@@ -1,3 +1,46 @@
+# Add these at the top of your file with other imports
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET")
+GOOGLE_PROJECT_NUMBER = os.environ.get("GOOGLE_PROJECT_NUMBER")
+
+# Add this new class to handle Google OAuth
+class GoogleAuthHandler:
+    def __init__(self):
+        self.flow = Flow.from_client_config(
+            {
+                "web": {
+                    "client_id": GOOGLE_CLIENT_ID,
+                    "client_secret": GOOGLE_CLIENT_SECRET,
+                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                    "token_uri": "https://oauth2.googleapis.com/token",
+					"redirect_uris": ["https://IT-BOT.azurewebsites.net/.auth/login/aad/callback"]
+                }
+            },
+            scopes=["https://www.googleapis.com/auth/chat.bot"]
+        )
+    
+    async def verify_google_token(self, token):
+        try:
+            idinfo = id_token.verify_oauth2_token(
+                token, 
+                requests.Request(), 
+                GOOGLE_CLIENT_ID,
+                clock_skew_in_seconds=10
+            )
+            
+            if idinfo['aud'] != GOOGLE_CLIENT_ID:
+                raise ValueError('Wrong audience.')
+            
+            return idinfo
+            
+        except ValueError as e:
+            print(f"Token verification failed: {e}")
+            return None
+
+from google.oauth2 import id_token
+from google.auth.transport import requests
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import Flow
 import copy
 import json
 import os
@@ -110,6 +153,90 @@ frontend_settings = {
 # Enable Microsoft Defender for Cloud Integration
 MS_DEFENDER_ENABLED = os.environ.get("MS_DEFENDER_ENABLED", "true").lower() == "true"
 
+# Modify your existing webhook route
+@bp.route("/webhook", methods=["POST"])
+async def google_chat_webhook():
+    try:
+        request_json = await request.get_json()
+        
+        # Verify the request is from Google Chat
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({"error": "No valid authorization header"}), 401
+            
+        token = auth_header.split(' ')[1]
+        
+        # Verify the token
+        auth_handler = GoogleAuthHandler()
+        token_info = await auth_handler.verify_google_token(token)
+        
+        if not token_info:
+            return jsonify({"error": "Invalid token"}), 401
+        
+        event_type = request_json.get("type")
+        
+        if event_type == "MESSAGE":
+            user_message = request_json.get("message", {}).get("text", "")
+            user_name = request_json.get("message", {}).get("sender", {}).get("displayName", "User")
+            
+            # Now handle_google_chat_message has proper authentication
+            response_text = await handle_google_chat_message(user_message, user_name)
+            
+            return jsonify({
+                "text": response_text
+            })
+            
+        elif event_type == "ADDED_TO_SPACE":
+            space_name = request_json.get("space", {}).get("name", "unknown space")
+            return jsonify({
+                "text": f"Thanks for adding me to {space_name}! I'm now properly authenticated to access all resources."
+            })
+            
+        elif event_type == "REMOVED_FROM_SPACE":
+            return jsonify({})
+            
+        else:
+            return jsonify({
+                "text": "I didn't understand that event type."
+            })
+            
+    except Exception as e:
+        logging.exception("Error handling Google Chat webhook")
+        return jsonify({"error": str(e)}), 500
+
+# Modify your existing handle_google_chat_message function
+async def handle_google_chat_message(user_message, user_name):
+    """
+    Process the user's message and return a response.
+    Now includes Azure AD authentication when accessing protected resources.
+    """
+    try:
+        # Get Azure AD token for accessing protected resources
+        async with DefaultAzureCredential() as credential:
+            token = await credential.get_token("https://storage.azure.com/.default")
+            
+        # Initialize Azure OpenAI client with the token
+        azure_openai_client = await init_openai_client()
+        
+        # Add system message to include context about available data sources
+        system_message = app_settings.azure_openai.system_message
+        if app_settings.datasource:
+            system_message += "\nYou have access to protected data sources and can use them to answer questions."
+        
+        response = await azure_openai_client.chat.completions.create(
+            model=app_settings.azure_openai.model,
+            messages=[
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": user_message}
+            ],
+            max_tokens=150
+        )
+        
+        return response.choices[0].message.content.strip()
+        
+    except Exception as e:
+        logging.exception("Error in Azure OpenAI response")
+        return "Sorry, I couldn't process your message due to an authentication error."
 
 # Initialize Azure OpenAI Client
 async def init_openai_client():
