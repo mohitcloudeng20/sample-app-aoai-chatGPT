@@ -15,6 +15,9 @@ from quart import (
     render_template,
     current_app,
 )
+from quart import redirect, session, url_for
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import Flow
 
 from openai import AsyncAzureOpenAI
 from azure.identity.aio import (
@@ -35,6 +38,11 @@ from backend.utils import (
     convert_to_pf_format,
     format_pf_non_streaming_response,
 )
+
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET")
+GOOGLE_REDIRECT_URI = os.environ.get("GOOGLE_REDIRECT_URI")
+SCOPES = ["https://www.googleapis.com/auth/chat.messages"]
 
 bp = Blueprint("routes", __name__, static_folder="static", template_folder="static")
 
@@ -58,6 +66,48 @@ def create_app():
     
     return app
 
+@bp.route("/oauth/login")
+async def google_login():
+    flow = Flow.from_client_config(
+        {
+            "web": {
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "redirect_uris": [GOOGLE_REDIRECT_URI],
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+            }
+        },
+        scopes=SCOPES,
+    )
+    flow.redirect_uri = GOOGLE_REDIRECT_URI
+    authorization_url, state = flow.authorization_url(prompt="consent")
+    session["oauth_state"] = state
+    return redirect(authorization_url)
+
+@bp.route("/oauth/callback")
+async def google_callback():
+    flow = Flow.from_client_config(
+        {
+            "web": {
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "redirect_uris": [GOOGLE_REDIRECT_URI],
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+            }
+        },
+        scopes=SCOPES,
+        state=session.get("oauth_state"),
+    )
+    flow.redirect_uri = GOOGLE_REDIRECT_URI
+    authorization_response = request.url
+    flow.fetch_token(authorization_response=authorization_response)
+
+    creds = flow.credentials
+    session["google_token"] = creds.to_json()
+    
+    return jsonify({"message": "Authentication successful. You can now use the chatbot!"})
 
 @bp.route("/")
 async def index():
@@ -66,7 +116,6 @@ async def index():
         title=app_settings.ui.title,
         favicon=app_settings.ui.favicon
     )
-
 
 @bp.route("/favicon.ico")
 async def favicon():
@@ -110,8 +159,20 @@ frontend_settings = {
 # Enable Microsoft Defender for Cloud Integration
 MS_DEFENDER_ENABLED = os.environ.get("MS_DEFENDER_ENABLED", "true").lower() == "true"
 
+async def get_authenticated_credentials():
+    google_token = session.get("google_token")
+    if not google_token:
+        return None
+
+    creds = Credentials.from_authorized_user_info(json.loads(google_token), SCOPES)
+    return creds
+
 @bp.route("/webhook", methods=["POST"])
 async def google_chat_webhook():
+    creds = await get_authenticated_credentials()
+    if not creds or not creds.valid:
+        return jsonify({"text": "Please authenticate first. [Click here](https://your-app.azurewebsites.net/oauth/login) to login."})
+    
     try:
         request_json = await request.get_json()
         event_type = request_json.get("type")
@@ -120,25 +181,21 @@ async def google_chat_webhook():
             user_message = request_json.get("message", {}).get("text", "")
             user_name = request_json.get("message", {}).get("sender", {}).get("displayName", "User")
             response_text = await handle_google_chat_message(user_message, user_name)
-            return jsonify({
-                "text": response_text
-            })
+            return jsonify({"text": response_text})
+        
         elif event_type == "ADDED_TO_SPACE":
             space_name = request_json.get("space", {}).get("name", "unknown space")
-            return jsonify({
-                "text": f"Thanks for adding me to {space_name}!"
-            })
+            return jsonify({"text": f"Thanks for adding me to {space_name}!"})
+
         elif event_type == "REMOVED_FROM_SPACE":
             return jsonify({})  # Handle bot removal logic if necessary
+
         else:
-            return jsonify({
-                "text": "I didn't understand that event type."
-            })
+            return jsonify({"text": "I didn't understand that event type."})
 
     except Exception as e:
         logging.exception("Error handling Google Chat webhook")
         return jsonify({"error": str(e)}), 500
-
 
 async def handle_google_chat_message(user_message, user_name):
     """
