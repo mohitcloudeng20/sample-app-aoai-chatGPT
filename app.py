@@ -175,6 +175,8 @@ async def google_chat_webhook():
     
     try:
         request_json = await request.get_json()
+        logging.debug(f"Received JSON: {request_json}")  # Add logging to inspect incoming requests
+
         event_type = request_json.get("type")
 
         if event_type == "MESSAGE":
@@ -182,14 +184,11 @@ async def google_chat_webhook():
             user_name = request_json.get("message", {}).get("sender", {}).get("displayName", "User")
             response_text = await handle_google_chat_message(user_message, user_name)
             return jsonify({"text": response_text})
-        
         elif event_type == "ADDED_TO_SPACE":
             space_name = request_json.get("space", {}).get("name", "unknown space")
             return jsonify({"text": f"Thanks for adding me to {space_name}!"})
-
         elif event_type == "REMOVED_FROM_SPACE":
             return jsonify({})  # Handle bot removal logic if necessary
-
         else:
             return jsonify({"text": "I didn't understand that event type."})
 
