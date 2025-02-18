@@ -5,6 +5,8 @@ import logging
 import uuid
 import httpx
 import asyncio
+import google.auth.transport.requests
+import google.auth.jwt
 from quart import (
     Blueprint,
     Quart,
@@ -15,6 +17,8 @@ from quart import (
     render_template,
     current_app,
 )
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
 
 from openai import AsyncAzureOpenAI
 from azure.identity.aio import (
@@ -36,10 +40,41 @@ from backend.utils import (
     format_pf_non_streaming_response,
 )
 
+# Load the Google Service Account JSON from environment variables
+google_credentials_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+
+if not google_credentials_json:
+    raise ValueError("GOOGLE_SERVICE_ACCOUNT_JSON environment variable is missing")
+
+# Parse the JSON string into a dictionary
+google_credentials_dict = json.loads(google_credentials_json)
+
+# Create Google Service Account credentials
+SCOPES = ["https://www.googleapis.com/auth/chat.bot"]
+credentials = service_account.Credentials.from_service_account_info(google_credentials_dict, scopes=SCOPES)
+
 bp = Blueprint("routes", __name__, static_folder="static", template_folder="static")
 
 cosmos_db_ready = asyncio.Event()
 
+async def verify_google_request(request):
+    """
+    Verify the JWT token from the Google Chat request.
+    """
+    auth_header = request.headers.get("Authorization", None)
+    if not auth_header or not auth_header.startswith("Bearer "):
+        return False
+
+    token = auth_header.split(" ")[1]
+    
+    try:
+        # Verify the token using Google's public keys
+        request_adapter = google.auth.transport.requests.Request()
+        info = google.auth.jwt.decode(token, request_adapter, verify=True, audience=SCOPES)
+        return True
+    except Exception as e:
+        logging.error(f"Google Chat request verification failed: {e}")
+        return False
 
 def create_app():
     app = Quart(__name__)
@@ -57,7 +92,6 @@ def create_app():
             raise e
     
     return app
-
 
 @bp.route("/")
 async def index():
@@ -116,49 +150,46 @@ async def google_chat_webhook():
         request_json = await request.get_json()
         event_type = request_json.get("type")
 
+        # Verify the request comes from Google
+        if not await verify_google_request(request):
+            return jsonify({"error": "Unauthorized request"}), 403
+
         if event_type == "MESSAGE":
             user_message = request_json.get("message", {}).get("text", "")
             user_name = request_json.get("message", {}).get("sender", {}).get("displayName", "User")
             response_text = await handle_google_chat_message(user_message, user_name)
-            return jsonify({
-                "text": response_text
-            })
+            return jsonify({"text": response_text})
+
         elif event_type == "ADDED_TO_SPACE":
             space_name = request_json.get("space", {}).get("name", "unknown space")
-            return jsonify({
-                "text": f"Thanks for adding me to {space_name}!"
-            })
+            return jsonify({"text": f"Thanks for adding me to {space_name}!"})
+
         elif event_type == "REMOVED_FROM_SPACE":
-            return jsonify({})  # Handle bot removal logic if necessary
+            return jsonify({})  # Handle bot removal logic if needed
+
         else:
-            return jsonify({
-                "text": "I didn't understand that event type."
-            })
+            return jsonify({"text": "I didn't understand that event type."})
 
     except Exception as e:
         logging.exception("Error handling Google Chat webhook")
         return jsonify({"error": str(e)}), 500
 
-
 async def handle_google_chat_message(user_message, user_name):
     """
-    Process the user's message and return a response.
-    This function can integrate with the Azure OpenAI chat logic in your app.
+    Process the user's message and send a response using Google Chat API.
     """
-    # Example: Forward the user message to Azure OpenAI for response
     try:
-        azure_openai_client = await init_openai_client()
-        response = await azure_openai_client.chat.completions.create(
-            model=app_settings.azure_openai.model,
-            messages=[
-                {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": user_message}
-            ],
-            max_tokens=150
-        )
-        return response.choices[0].message.content.strip()
+        service = build("chat", "v1", credentials=credentials)
+
+        response_text = f"Hello {user_name}, you said: {user_message}"
+        space_id = "spaces/XXXXXXXXX"  # Extract from request_json if dynamic
+
+        message = {"text": response_text}
+        service.spaces().messages().create(parent=space_id, body=message).execute()
+
+        return response_text
     except Exception as e:
-        logging.exception("Error in Azure OpenAI response")
+        logging.exception("Error in Google Chat response")
         return "Sorry, I couldn't process your message."
 
 # Initialize Azure OpenAI Client
