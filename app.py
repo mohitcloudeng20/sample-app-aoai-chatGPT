@@ -21,6 +21,9 @@ from google.auth.transport import requests
 from azure.identity import ClientSecretCredential
 from quart import session
 from typing import Dict, Any
+from functools import wraps
+import jwt
+import time
 
 from openai import AsyncAzureOpenAI
 from azure.identity.aio import (
@@ -50,9 +53,12 @@ cosmos_db_ready = asyncio.Event()
 class GoogleAuthSettings:
     client_id: str  # Google OAuth client ID
     client_secret: str  # Google OAuth client secret
-    project_number: str  # Google Cloud project number
+    project_number: str  # Google Cloud project 
 
-
+# Add these settings to your app_settings
+GOOGLE_CHAT_PROJECT_NUMBER = os.getenv("GOOGLE_CHAT_PROJECT_NUMBER")
+GOOGLE_CHAT_AUTH_TOKEN = os.getenv("GOOGLE_CHAT_AUTH_TOKEN")
+    
 def create_app():
     app = Quart(__name__)
     app.register_blueprint(bp)
@@ -69,6 +75,215 @@ def create_app():
             raise e
     
     return app
+
+ef verify_google_chat_jwt(token):
+    try:
+        # Verify and decode the JWT
+        decoded_token = jwt.decode(
+            token,
+            GOOGLE_CHAT_AUTH_TOKEN,
+            algorithms=["RS256"],
+            audience=f"{GOOGLE_CHAT_PROJECT_NUMBER}"
+        )
+        
+        # Verify token hasn't expired
+        if decoded_token["exp"] < time.time():
+            return None
+            
+        return decoded_token
+    except Exception as e:
+        logging.exception("Error verifying Google Chat JWT")
+        return None
+
+def require_google_chat_auth(f):
+    @wraps(f)
+    async def decorated_function(*args, **kwargs):
+        # Get authorization header
+        auth_header = request.headers.get("Authorization")
+        if not auth_header or not auth_header.startswith("Bearer "):
+            return jsonify({"error": "Missing or invalid authorization header"}), 401
+            
+        # Extract and verify token
+        token = auth_header.split(" ")[1]
+        decoded_token = verify_google_chat_jwt(token)
+        if not decoded_token:
+            return jsonify({"error": "Invalid or expired token"}), 401
+            
+        # Add verified user info to request
+        request.google_chat_user = decoded_token
+        return await f(*args, **kwargs)
+    return decorated_function
+
+@bp.route("/google-chat-webhook", methods=["POST"])
+@require_google_chat_auth
+async def google_chat_webhook():
+    try:
+        request_json = await request.get_json()
+        
+        # Verify the request structure
+        if not is_valid_google_chat_request(request_json):
+            return jsonify({"error": "Invalid request format"}), 400
+            
+        event_type = request_json.get("type")
+        space = request_json.get("space", {})
+        user = request_json.get("user", {})
+        
+        # Handle different event types
+        if event_type == "ADDED_TO_SPACE":
+            return jsonify({
+                "text": f"Thanks for adding me to {space.get('displayName', 'this space')}! " 
+                        "Send me a message to start chatting."
+            })
+            
+        elif event_type == "MESSAGE":
+            message = request_json.get("message", {})
+            user_message = message.get("text", "").strip()
+            
+            if not user_message:
+                return jsonify({"text": "I couldn't understand your message. Please try again."})
+                
+            # Process message with Azure OpenAI
+            response_text = await handle_google_chat_message(
+                user_message,
+                user,
+                space.get("name")
+            )
+            
+            # Format response for Google Chat
+            return jsonify({
+                "text": response_text,
+                "cards": [{
+                    "sections": [{
+                        "widgets": [{
+                            "textParagraph": {
+                                "text": response_text
+                            }
+                        }]
+                    }]
+                }]
+            })
+            
+        elif event_type == "REMOVED_FROM_SPACE":
+            # Clean up any space-specific resources if needed
+            return jsonify({})
+            
+        else:
+            return jsonify({"text": "Unsupported event type"}), 400
+            
+    except Exception as e:
+        logging.exception("Error in Google Chat webhook")
+        return jsonify({
+            "text": "I encountered an error processing your request. Please try again."
+        }), 200  # Return 200 to prevent retries
+
+async def handle_google_chat_message(user_message: str, user_info: dict, space_name: str) -> str:
+    try:
+        # Initialize Azure OpenAI client
+        azure_openai_client = await init_openai_client()
+        
+        # Add context about the chat environment
+        system_message = (
+            f"{app_settings.azure_openai.system_message}\n"
+            "You are currently responding in a Google Chat conversation. "
+            "Keep responses concise and professional."
+        )
+        
+        # Process message
+        response = await azure_openai_client.chat.completions.create(
+            model=app_settings.azure_openai.model,
+            messages=[
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": user_message}
+            ],
+            max_tokens=800,
+            temperature=0.7
+        )
+        
+        response_text = response.choices[0].message.content.strip()
+        
+        # Store conversation in CosmosDB if enabled
+        if current_app.cosmos_conversation_client:
+            user_email = user_info.get("email", "unknown_user")
+            conversation_id = f"googlechat_{space_name}_{int(time.time())}"
+            await store_conversation(
+                user_email=user_email,
+                user_message=user_message,
+                bot_response=response_text,
+                conversation_id=conversation_id,
+                space_name=space_name
+            )
+            
+        return response_text
+        
+    except Exception as e:
+        logging.exception("Error processing Google Chat message")
+        return "I apologize, but I encountered an error processing your message. Please try again."
+
+def is_valid_google_chat_request(request_data: dict) -> bool:
+    """Validate incoming Google Chat request structure"""
+    required_fields = ["type", "space", "user"]
+    if not all(field in request_data for field in required_fields):
+        return False
+        
+    space = request_data.get("space", {})
+    if not space.get("name"):
+        return False
+        
+    event_type = request_data.get("type")
+    if event_type not in ["ADDED_TO_SPACE", "MESSAGE", "REMOVED_FROM_SPACE"]:
+        return False
+        
+    if event_type == "MESSAGE":
+        message = request_data.get("message", {})
+        if not message or "text" not in message:
+            return False
+            
+    return True
+
+async def store_conversation(
+    user_email: str,
+    user_message: str,
+    bot_response: str,
+    conversation_id: str,
+    space_name: str
+):
+    """Store Google Chat conversation in CosmosDB"""
+    try:
+        if not current_app.cosmos_conversation_client:
+            logging.warning("CosmosDB client not configured, skipping conversation storage")
+            return
+            
+        # Store user message
+        await current_app.cosmos_conversation_client.create_message(
+            uuid=str(uuid.uuid4()),
+            conversation_id=conversation_id,
+            user_id=user_email,
+            input_message={
+                "role": "user",
+                "content": user_message,
+                "metadata": {
+                    "source": "google_chat",
+                    "space_name": space_name
+                }
+            }
+        )
+        
+        # Store bot response
+        await current_app.cosmos_conversation_client.create_message(
+            uuid=str(uuid.uuid4()),
+            conversation_id=conversation_id,
+            user_id=user_email,
+            input_message={
+                "role": "assistant",
+                "content": bot_response,
+                "metadata": {
+                    "source": "google_chat",
+                    "space_name": space_name
+                }
+            }
+        )
+    except Exception as e:
+        logging.exception("Error storing Google Chat conversation in CosmosDB")
 
 # Add new endpoint for Google Chat authentication
 @bp.route("/google-chat-auth", methods=["POST"])
