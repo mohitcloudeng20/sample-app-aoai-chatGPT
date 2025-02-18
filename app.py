@@ -18,6 +18,10 @@ from quart import (
 from quart import redirect, session, url_for
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
+from google.auth.transport import requests as google_requests
+from google.auth.transport import requests
+from google.oauth2 import id_token
+from quart_rate_limiter import RateLimiter, rate_limit
 
 from openai import AsyncAzureOpenAI
 from azure.identity.aio import (
@@ -66,6 +70,26 @@ def create_app():
     
     return app
 
+async def validate_google_token():
+    creds = await get_authenticated_credentials()
+    if not creds:
+        return False
+    try:
+        creds.refresh(google_requests.Request())
+        return True
+    except Exception as e:
+        logging.error(f"Token validation failed: {e}")
+        return False
+
+async def validate_google_chat_request(request):
+    try:
+        token = request.headers.get("Authorization", "").split("Bearer ")[1]
+        id_info = id_token.verify_oauth2_token(token, requests.Request(), GOOGLE_CLIENT_ID)
+        return id_info
+    except Exception as e:
+        logging.error(f"Request validation failed: {e}")
+        return None
+
 @bp.route("/oauth/login")
 async def google_login():
     flow = Flow.from_client_config(
@@ -108,6 +132,10 @@ async def google_callback():
     session["google_token"] = creds.to_json()
     
     return jsonify({"message": "Authentication successful. You can now use the chatbot!"})
+
+    except Exception as e:
+        logging.error(f"OAuth callback failed: {e}")
+        return jsonify({"error": "Authentication failed. Please try again."}), 500
 
 @bp.route("/")
 async def index():
@@ -167,41 +195,33 @@ async def get_authenticated_credentials():
     creds = Credentials.from_authorized_user_info(json.loads(google_token), SCOPES)
     return creds
 
+rate_limiter = RateLimiter(app)
 @bp.route("/webhook", methods=["POST"])
+@rate_limit(10, 60)  # 10 requests per minute
 async def google_chat_webhook():
-    creds = await get_authenticated_credentials()
-    if not creds or not creds.valid:
-        return jsonify({"text": "Please authenticate first. [Click here](https://your-app.azurewebsites.net/oauth/login) to login."})
-    
     try:
         request_json = await request.get_json()
-        logging.debug(f"Received JSON: {request_json}")  # Add logging to inspect incoming requests
+        logging.debug(f"Received request: {request_json}")
 
         event_type = request_json.get("type")
+        if not event_type:
+            return jsonify({"text": "Invalid event type."}), 400
 
         if event_type == "MESSAGE":
             user_message = request_json.get("message", {}).get("text", "")
+            if not user_message:
+                return jsonify({"text": "No message text provided."}), 400
             user_name = request_json.get("message", {}).get("sender", {}).get("displayName", "User")
             response_text = await handle_google_chat_message(user_message, user_name)
-            return jsonify({"text": response_text})
-        elif event_type == "ADDED_TO_SPACE":
-            space_name = request_json.get("space", {}).get("name", "unknown space")
-            return jsonify({"text": f"Thanks for adding me to {space_name}!"})
-        elif event_type == "REMOVED_FROM_SPACE":
-            return jsonify({})  # Handle bot removal logic if necessary
-        else:
-            return jsonify({"text": "I didn't understand that event type."})
-
+            response_payload = {"text": response_text}
+            logging.debug(f"Sending response: {response_payload}")
+            return jsonify(response_payload)
+        # Handle other event types...
     except Exception as e:
         logging.exception("Error handling Google Chat webhook")
         return jsonify({"error": str(e)}), 500
 
 async def handle_google_chat_message(user_message, user_name):
-    """
-    Process the user's message and return a response.
-    This function can integrate with the Azure OpenAI chat logic in your app.
-    """
-    # Example: Forward the user message to Azure OpenAI for response
     try:
         azure_openai_client = await init_openai_client()
         response = await azure_openai_client.chat.completions.create(
@@ -215,7 +235,7 @@ async def handle_google_chat_message(user_message, user_name):
         return response.choices[0].message.content.strip()
     except Exception as e:
         logging.exception("Error in Azure OpenAI response")
-        return "Sorry, I couldn't process your message."
+        return "Sorry, I couldn't process your message. Please try again later."
 
 # Initialize Azure OpenAI Client
 async def init_openai_client():
