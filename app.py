@@ -16,6 +16,11 @@ from quart import (
     current_app,
 )
 
+from google.oauth2 import id_token
+from google.auth.transport import requests
+from azure.identity import ClientSecretCredential
+from quart import session
+
 from openai import AsyncAzureOpenAI
 from azure.identity.aio import (
     DefaultAzureCredential,
@@ -40,6 +45,12 @@ bp = Blueprint("routes", __name__, static_folder="static", template_folder="stat
 
 cosmos_db_ready = asyncio.Event()
 
+# Add these to your app settings
+class GoogleAuthSettings:
+    client_id: str  # Google OAuth client ID
+    client_secret: str  # Google OAuth client secret
+    project_number: str  # Google Cloud project number
+
 
 def create_app():
     app = Quart(__name__)
@@ -58,6 +69,54 @@ def create_app():
     
     return app
 
+# Add new endpoint for Google Chat authentication
+@bp.route("/google-chat-auth", methods=["POST"])
+async def google_chat_auth():
+    try:
+        request_json = await request.get_json()
+        
+        # Verify the request is from Google Chat
+        space_type = request_json.get("space", {}).get("type")
+        if space_type not in ["ROOM", "DM"]:
+            return jsonify({"error": "Invalid space type"}), 400
+            
+        # Get user information
+        user_info = request_json.get("user", {})
+        
+        # Verify user domain matches your organization
+        user_email = user_info.get("email", "")
+        if not user_email.endswith("@yourdomain.com"):
+            return jsonify({"error": "Unauthorized domain"}), 403
+            
+        return jsonify({"status": "authenticated"})
+        
+    except Exception as e:
+        logging.exception("Error in Google Chat authentication")
+        return jsonify({"error": str(e)}), 500
+
+async def store_conversation(user_email, user_message, bot_response):
+    """Store conversation in CosmosDB"""
+    conversation_id = str(uuid.uuid4())
+    
+    await current_app.cosmos_conversation_client.create_message(
+        uuid=str(uuid.uuid4()),
+        conversation_id=conversation_id,
+        user_id=user_email,
+        input_message={
+            "role": "user",
+            "content": user_message
+        }
+    )
+    
+    await current_app.cosmos_conversation_client.create_message(
+        uuid=str(uuid.uuid4()),
+        conversation_id=conversation_id,
+        user_id=user_email,
+        input_message={
+            "role": "assistant",
+            "content": bot_response
+        }
+    )
 
 @bp.route("/")
 async def index():
@@ -139,27 +198,54 @@ async def google_chat_webhook():
         logging.exception("Error handling Google Chat webhook")
         return jsonify({"error": str(e)}), 500
 
-
-async def handle_google_chat_message(user_message, user_name):
-    """
-    Process the user's message and return a response.
-    This function can integrate with the Azure OpenAI chat logic in your app.
-    """
-    # Example: Forward the user message to Azure OpenAI for response
+async def handle_google_chat_message(user_message, user_info):
     try:
-        azure_openai_client = await init_openai_client()
+        # Verify the user's Google identity token
+        id_info = id_token.verify_oauth2_token(
+            user_info.get('token'),
+            requests.Request(),
+            app_settings.google_auth.client_id
+        )
+        
+        # Get user's email from verified token
+        user_email = id_info.get('email')
+        
+        # Get Azure AD token using managed identity or service principal
+        azure_credential = ClientSecretCredential(
+            tenant_id=app_settings.azure_ad.tenant_id,
+            client_id=app_settings.azure_ad.client_id,
+            client_secret=app_settings.azure_ad.client_secret
+        )
+        
+        # Get token for Azure services
+        azure_token = await azure_credential.get_token("https://cognitiveservices.azure.com/.default")
+        
+        # Create authenticated Azure OpenAI client
+        azure_openai_client = AsyncAzureOpenAI(
+            api_version=app_settings.azure_openai.preview_api_version,
+            azure_endpoint=app_settings.azure_openai.endpoint,
+            azure_ad_token=azure_token.token
+        )
+        
+        # Process message with Azure OpenAI
         response = await azure_openai_client.chat.completions.create(
             model=app_settings.azure_openai.model,
             messages=[
-                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "system", "content": app_settings.azure_openai.system_message},
                 {"role": "user", "content": user_message}
             ],
             max_tokens=150
         )
+        
+        # Store conversation in CosmosDB if enabled
+        if current_app.cosmos_conversation_client:
+            await store_conversation(user_email, user_message, response.choices[0].message.content)
+            
         return response.choices[0].message.content.strip()
+        
     except Exception as e:
-        logging.exception("Error in Azure OpenAI response")
-        return "Sorry, I couldn't process your message."
+        logging.exception("Error processing Google Chat message")
+        return "Sorry, I couldn't authenticate your request. Please ensure you're using your work Google account."
 
 # Initialize Azure OpenAI Client
 async def init_openai_client():
