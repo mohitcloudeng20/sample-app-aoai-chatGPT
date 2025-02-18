@@ -197,33 +197,45 @@ async def get_authenticated_credentials():
 
 rate_limiter = RateLimiter(app)
 @bp.route("/webhook", methods=["POST"])
-@rate_limit(10, 60)  # 10 requests per minute
+@rate_limit(10, 60)
 async def google_chat_webhook():
     try:
+        logging.info("Received webhook request")
         request_json = await request.get_json()
-        logging.debug(f"Received request: {request_json}")
-
+        logging.info(f"Request JSON: {request_json}")
+        
         event_type = request_json.get("type")
+        logging.info(f"Event type: {event_type}")
+        
         if not event_type:
+            logging.error("Invalid event type")
             return jsonify({"text": "Invalid event type."}), 400
 
         if event_type == "MESSAGE":
             user_message = request_json.get("message", {}).get("text", "")
+            logging.info(f"User message: {user_message}")
+            
             if not user_message:
+                logging.error("No message text provided")
                 return jsonify({"text": "No message text provided."}), 400
+                
             user_name = request_json.get("message", {}).get("sender", {}).get("displayName", "User")
+            logging.info(f"User name: {user_name}")
+            
             response_text = await handle_google_chat_message(user_message, user_name)
             response_payload = {"text": response_text}
-            logging.debug(f"Sending response: {response_payload}")
+            logging.info(f"Sending response: {response_payload}")
             return jsonify(response_payload)
-        # Handle other event types...
     except Exception as e:
-        logging.exception("Error handling Google Chat webhook")
+        logging.exception("Error in webhook handler")
         return jsonify({"error": str(e)}), 500
 
 async def handle_google_chat_message(user_message, user_name):
     try:
+        logging.info(f"Initializing Azure OpenAI client")
         azure_openai_client = await init_openai_client()
+        
+        logging.info(f"Sending request to Azure OpenAI")
         response = await azure_openai_client.chat.completions.create(
             model=app_settings.azure_openai.model,
             messages=[
@@ -232,10 +244,13 @@ async def handle_google_chat_message(user_message, user_name):
             ],
             max_tokens=150
         )
-        return response.choices[0].message.content.strip()
+        
+        result = response.choices[0].message.content.strip()
+        logging.info(f"Got response: {result}")
+        return result
     except Exception as e:
-        logging.exception("Error in Azure OpenAI response")
-        return "Sorry, I couldn't process your message. Please try again later."
+        logging.exception("Error processing message")
+        return f"Sorry, I encountered an error: {str(e)}"
 
 # Initialize Azure OpenAI Client
 async def init_openai_client():
