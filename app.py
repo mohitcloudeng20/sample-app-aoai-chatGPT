@@ -113,24 +113,36 @@ MS_DEFENDER_ENABLED = os.environ.get("MS_DEFENDER_ENABLED", "true").lower() == "
 @bp.route("/webhook", methods=["POST"])
 async def google_chat_webhook():
     try:
+        # Parse the incoming request
         request_json = await request.get_json()
         event_type = request_json.get("type")
 
         if event_type == "MESSAGE":
+            # Extract user message and sender details
             user_message = request_json.get("message", {}).get("text", "")
             user_name = request_json.get("message", {}).get("sender", {}).get("displayName", "User")
+            
+            # Process the message using Azure OpenAI
             response_text = await handle_google_chat_message(user_message, user_name)
+            
+            # Return the response to Google Chat
             return jsonify({
                 "text": response_text
             })
+        
         elif event_type == "ADDED_TO_SPACE":
+            # Handle bot being added to a space
             space_name = request_json.get("space", {}).get("name", "unknown space")
             return jsonify({
                 "text": f"Thanks for adding me to {space_name}!"
             })
+        
         elif event_type == "REMOVED_FROM_SPACE":
-            return jsonify({})  # Handle bot removal logic if necessary
+            # Handle bot removal logic if necessary
+            return jsonify({})
+        
         else:
+            # Handle unknown event types
             return jsonify({
                 "text": "I didn't understand that event type."
             })
@@ -143,9 +155,8 @@ async def google_chat_webhook():
 async def handle_google_chat_message(user_message, user_name):
     """
     Process the user's message and return a response.
-    This function can integrate with the Azure OpenAI chat logic in your app.
+    This function integrates with Azure OpenAI to generate responses.
     """
-    # Example: Forward the user message to Azure OpenAI for response
     try:
         azure_openai_client = await init_openai_client()
         response = await azure_openai_client.chat.completions.create(
@@ -157,6 +168,7 @@ async def handle_google_chat_message(user_message, user_name):
             max_tokens=150
         )
         return response.choices[0].message.content.strip()
+    
     except Exception as e:
         logging.exception("Error in Azure OpenAI response")
         return "Sorry, I couldn't process your message."
