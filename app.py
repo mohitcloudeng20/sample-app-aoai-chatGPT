@@ -113,7 +113,6 @@ MS_DEFENDER_ENABLED = os.environ.get("MS_DEFENDER_ENABLED", "true").lower() == "
 @bp.route("/webhook", methods=["POST"])
 async def google_chat_webhook():
     try:
-        # Parse the incoming request
         request_json = await request.get_json()
         event_type = request_json.get("type")
 
@@ -121,28 +120,37 @@ async def google_chat_webhook():
             # Extract user message and sender details
             user_message = request_json.get("message", {}).get("text", "")
             user_name = request_json.get("message", {}).get("sender", {}).get("displayName", "User")
-            
-            # Process the message using Azure OpenAI
-            response_text = await handle_google_chat_message(user_message, user_name)
-            
-            # Return the response to Google Chat
+
+            # Prepare model arguments similar to /conversation
+            model_args = {
+                "messages": [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": user_message},
+                ],
+                "model": app_settings.azure_openai.model,
+                "max_tokens": 150,
+                # Add other parameters as needed
+            }
+
+            # Call Azure OpenAI with prepared arguments
+            azure_openai_client = await init_openai_client()
+            response = await azure_openai_client.chat.completions.create(**model_args)
+            response_text = response.choices[0].message.content.strip()
+
             return jsonify({
                 "text": response_text
             })
-        
+
         elif event_type == "ADDED_TO_SPACE":
-            # Handle bot being added to a space
             space_name = request_json.get("space", {}).get("name", "unknown space")
             return jsonify({
                 "text": f"Thanks for adding me to {space_name}!"
             })
-        
+
         elif event_type == "REMOVED_FROM_SPACE":
-            # Handle bot removal logic if necessary
             return jsonify({})
-        
+
         else:
-            # Handle unknown event types
             return jsonify({
                 "text": "I didn't understand that event type."
             })
