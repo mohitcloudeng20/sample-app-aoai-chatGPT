@@ -124,13 +124,23 @@ async def google_chat_webhook():
             # Prepare model arguments similar to /conversation
             model_args = {
                 "messages": [
-                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "system", "content": app_settings.azure_openai.system_message},
                     {"role": "user", "content": user_message},
                 ],
                 "model": app_settings.azure_openai.model,
-                "max_tokens": 150,
-                # Add other parameters as needed
+                "max_tokens": app_settings.azure_openai.max_tokens,
+                "temperature": app_settings.azure_openai.temperature,
+                "top_p": app_settings.azure_openai.top_p,
+                "stop": app_settings.azure_openai.stop_sequence,
             }
+
+            # Include data sources if configured
+            if app_settings.datasource:
+                model_args["extra_body"] = {
+                    "data_sources": [
+                        app_settings.datasource.construct_payload_configuration(request=request)
+                    ]
+                }
 
             # Call Azure OpenAI with prepared arguments
             azure_openai_client = await init_openai_client()
