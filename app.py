@@ -113,6 +113,10 @@ MS_DEFENDER_ENABLED = os.environ.get("MS_DEFENDER_ENABLED", "true").lower() == "
 @bp.route("/webhook", methods=["POST"])
 async def google_chat_webhook():
     try:
+        # Bypass authentication for /webhook
+        if request.headers.get("Authorization") is None:
+            logging.debug("No Authorization header found for /webhook")
+
         # Parse the incoming request
         request_json = await request.get_json()
         event_type = request_json.get("type")
@@ -131,18 +135,15 @@ async def google_chat_webhook():
             })
 
         elif event_type == "ADDED_TO_SPACE":
-            # Handle bot being added to a space
             space_name = request_json.get("space", {}).get("name", "unknown space")
             return jsonify({
                 "text": f"Thanks for adding me to {space_name}!"
             })
 
         elif event_type == "REMOVED_FROM_SPACE":
-            # Handle bot removal logic if necessary
             return jsonify({})
 
         else:
-            # Handle unknown event types
             return jsonify({
                 "text": "I didn't understand that event type."
             })
