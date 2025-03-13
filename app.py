@@ -113,21 +113,55 @@ MS_DEFENDER_ENABLED = os.environ.get("MS_DEFENDER_ENABLED", "true").lower() == "
 @bp.route("/webhook", methods=["POST"])
 async def google_chat_webhook():
     try:
-        # Bypass authentication for /webhook
-        if request.headers.get("Authorization") is None:
-            logging.debug("No Authorization header found for /webhook")
-
         # Parse the incoming request
         request_json = await request.get_json()
         event_type = request_json.get("type")
 
-        if event_type == "MESSAGE":
-            # Extract user message and sender details
-            user_message = request_json.get("message", {}).get("text", "")
-            user_name = request_json.get("message", {}).get("sender", {}).get("displayName", "User")
+        # Extract Authorization header (token)
+        auth_token = request.headers.get("Authorization")
+        if not auth_token:
+            return jsonify({"error": "Unauthorized"}), 401
 
-            # Process the message using Azure OpenAI
-            response_text = await handle_google_chat_message(user_message, user_name)
+        # Validate token
+        decoded_token = await validate_token(auth_token)
+        if not decoded_token:
+            return jsonify({"error": "Invalid token"}), 401
+
+        # Extract user details from the token
+        user_id = decoded_token.get("user_principal_id")
+        user_name = decoded_token.get("name")
+
+        if event_type == "MESSAGE":
+            # Extract user message
+            user_message = request_json.get("message", {}).get("text", "")
+            if not user_message:
+                return jsonify({"error": "No user message found"}), 400
+
+            # Prepare model arguments
+            model_args = {
+                "messages": [
+                    {"role": "system", "content": app_settings.azure_openai.system_message},
+                    {"role": "user", "content": user_message},
+                ],
+                "model": app_settings.azure_openai.model,
+                "max_tokens": app_settings.azure_openai.max_tokens,
+                "temperature": app_settings.azure_openai.temperature,
+                "top_p": app_settings.azure_openai.top_p,
+                "stop": app_settings.azure_openai.stop_sequence,
+            }
+
+            # Include data sources if configured
+            if app_settings.datasource:
+                model_args["extra_body"] = {
+                    "data_sources": [
+                        app_settings.datasource.construct_payload_configuration(request=request)
+                    ]
+                }
+
+            # Call Azure OpenAI with prepared arguments
+            azure_openai_client = await init_openai_client()
+            response = await azure_openai_client.chat.completions.create(**model_args)
+            response_text = response.choices[0].message.content.strip()
 
             # Return the response to Google Chat
             return jsonify({
@@ -137,7 +171,7 @@ async def google_chat_webhook():
         elif event_type == "ADDED_TO_SPACE":
             space_name = request_json.get("space", {}).get("name", "unknown space")
             return jsonify({
-                "text": f"Thanks for adding me to {space_name}!"
+                "text": f"Thanks for adding me to {space_name}! Please authenticate to continue."
             })
 
         elif event_type == "REMOVED_FROM_SPACE":
@@ -151,6 +185,25 @@ async def google_chat_webhook():
     except Exception as e:
         logging.exception("Error handling Google Chat webhook")
         return jsonify({"error": str(e)}), 500
+
+
+async def validate_token(token):
+    """
+    Validates the Authorization token and returns user details if valid.
+    """
+    try:
+        async with DefaultAzureCredential() as credential:
+            token_claims = credential.get_token(token).token
+            decoded_token = json.loads(token_claims)
+
+        # Extract user details
+        user_id = decoded_token.get("oid")  # Object ID of the user
+        user_name = decoded_token.get("name")
+        return {"user_id": user_id, "name": user_name}
+
+    except Exception as e:
+        logging.exception("Token validation failed", e)
+        return None
 
 async def handle_google_chat_message(user_message, user_name):
     """
