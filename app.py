@@ -119,11 +119,11 @@ async def google_chat_webhook():
 
         # Extract Authorization header (token)
         auth_token = request.headers.get("Authorization")
-        if not auth_token:
+        if not auth_token or not auth_token.startswith("Bearer "):
             return jsonify({"error": "Unauthorized"}), 401
 
         # Validate token
-        decoded_token = await validate_token(auth_token)
+        decoded_token = await validate_token(auth_token.split(" ")[1])
         if not decoded_token:
             return jsonify({"error": "Invalid token"}), 401
 
@@ -141,7 +141,7 @@ async def google_chat_webhook():
             model_args = {
                 "messages": [
                     {"role": "system", "content": app_settings.azure_openai.system_message},
-                    {"role": "user", "content": user_message},
+                    {"role": "user", "content": user_message}
                 ],
                 "model": app_settings.azure_openai.model,
                 "max_tokens": app_settings.azure_openai.max_tokens,
@@ -189,7 +189,7 @@ async def google_chat_webhook():
 
 async def validate_token(token):
     """
-    Validates the Authorization token and returns user details if valid.
+    Validates the OAuth token against Azure Entra ID.
     """
     try:
         async with DefaultAzureCredential() as credential:
@@ -199,7 +199,7 @@ async def validate_token(token):
         # Extract user details
         user_id = decoded_token.get("oid")  # Object ID of the user
         user_name = decoded_token.get("name")
-        return {"user_id": user_id, "name": user_name}
+        return {"user_principal_id": user_id, "name": user_name}
 
     except Exception as e:
         logging.exception("Token validation failed", e)
