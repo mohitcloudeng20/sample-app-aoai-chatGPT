@@ -205,6 +205,42 @@ async def validate_token(token):
         logging.exception("Token validation failed", e)
         return None
 
+@bp.route("/auth/token", methods=["GET"])
+async def get_auth_token():
+    try:
+        authenticated_user = get_authenticated_user_details(request_headers=request.headers)
+        user_id = authenticated_user["user_principal_id"]
+        user_name = authenticated_user["name"]
+
+        # Generate a token for the user
+        token = generate_user_token(user_id, user_name)
+
+        return jsonify({
+            "token": token
+        }), 200
+
+    except Exception as e:
+        logging.exception("Error issuing token")
+        return jsonify({"error": str(e)}), 500
+
+
+def generate_user_token(user_id, user_name):
+    """
+    Generates a token for the user.
+    This could be a JWT or any other secure token format.
+    """
+    import jwt
+    import datetime
+
+    payload = {
+        "user_id": user_id,
+        "user_name": user_name,
+        "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=1),
+        "iat": datetime.datetime.utcnow(),
+    }
+    secret_key = os.environ.get("JWT_SECRET_KEY")
+    return jwt.encode(payload, secret_key, algorithm="HS256")
+
 async def handle_google_chat_message(user_message, user_name):
     """
     Process the user's message and return a response.
