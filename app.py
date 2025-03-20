@@ -113,35 +113,19 @@ MS_DEFENDER_ENABLED = os.environ.get("MS_DEFENDER_ENABLED", "true").lower() == "
 @bp.route("/webhook", methods=["POST"])
 async def google_chat_webhook():
     try:
-        # Parse the incoming request
         request_json = await request.get_json()
         event_type = request_json.get("type")
 
-        # Extract Authorization header (token)
-        auth_token = request.headers.get("Authorization")
-        if not auth_token or not auth_token.startswith("Bearer "):
-            return jsonify({"error": "Unauthorized"}), 401
-
-        # Validate token
-        decoded_token = await validate_token(auth_token.split(" ")[1])
-        if not decoded_token:
-            return jsonify({"error": "Invalid token"}), 401
-
-        # Extract user details from the token
-        user_id = decoded_token.get("user_principal_id")
-        user_name = decoded_token.get("name")
-
         if event_type == "MESSAGE":
-            # Extract user message
+            # Extract user message and sender details
             user_message = request_json.get("message", {}).get("text", "")
-            if not user_message:
-                return jsonify({"error": "No user message found"}), 400
+            user_name = request_json.get("message", {}).get("sender", {}).get("displayName", "User")
 
-            # Prepare model arguments
+            # Prepare model arguments similar to /conversation
             model_args = {
                 "messages": [
                     {"role": "system", "content": app_settings.azure_openai.system_message},
-                    {"role": "user", "content": user_message}
+                    {"role": "user", "content": user_message},
                 ],
                 "model": app_settings.azure_openai.model,
                 "max_tokens": app_settings.azure_openai.max_tokens,
@@ -163,7 +147,6 @@ async def google_chat_webhook():
             response = await azure_openai_client.chat.completions.create(**model_args)
             response_text = response.choices[0].message.content.strip()
 
-            # Return the response to Google Chat
             return jsonify({
                 "text": response_text
             })
@@ -171,7 +154,7 @@ async def google_chat_webhook():
         elif event_type == "ADDED_TO_SPACE":
             space_name = request_json.get("space", {}).get("name", "unknown space")
             return jsonify({
-                "text": f"Thanks for adding me to {space_name}! Please authenticate to continue."
+                "text": f"Thanks for adding me to {space_name}!"
             })
 
         elif event_type == "REMOVED_FROM_SPACE":
@@ -186,60 +169,6 @@ async def google_chat_webhook():
         logging.exception("Error handling Google Chat webhook")
         return jsonify({"error": str(e)}), 500
 
-
-async def validate_token(token):
-    """
-    Validates the OAuth token against Azure Entra ID.
-    """
-    try:
-        async with DefaultAzureCredential() as credential:
-            token_claims = credential.get_token(token).token
-            decoded_token = json.loads(token_claims)
-
-        # Extract user details
-        user_id = decoded_token.get("oid")  # Object ID of the user
-        user_name = decoded_token.get("name")
-        return {"user_principal_id": user_id, "name": user_name}
-
-    except Exception as e:
-        logging.exception("Token validation failed", e)
-        return None
-
-@bp.route("/auth/token", methods=["GET"])
-async def get_auth_token():
-    try:
-        authenticated_user = get_authenticated_user_details(request_headers=request.headers)
-        user_id = authenticated_user["user_principal_id"]
-        user_name = authenticated_user["name"]
-
-        # Generate a token for the user
-        token = generate_user_token(user_id, user_name)
-
-        return jsonify({
-            "token": token
-        }), 200
-
-    except Exception as e:
-        logging.exception("Error issuing token")
-        return jsonify({"error": str(e)}), 500
-
-
-def generate_user_token(user_id, user_name):
-    """
-    Generates a token for the user.
-    This could be a JWT or any other secure token format.
-    """
-    import jwt
-    import datetime
-
-    payload = {
-        "user_id": user_id,
-        "user_name": user_name,
-        "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=1),
-        "iat": datetime.datetime.utcnow(),
-    }
-    secret_key = os.environ.get("JWT_SECRET_KEY")
-    return jwt.encode(payload, secret_key, algorithm="HS256")
 
 async def handle_google_chat_message(user_message, user_name):
     """
