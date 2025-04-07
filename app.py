@@ -16,6 +16,7 @@ from quart import (
     current_app,
 )
 
+from backend.auth.token_validator import validate_jwt
 from openai import AsyncAzureOpenAI
 from azure.identity.aio import (
     DefaultAzureCredential,
@@ -35,6 +36,11 @@ from backend.utils import (
     convert_to_pf_format,
     format_pf_non_streaming_response,
 )
+from backend.auth.oauth_routes import authenticated_users
+
+TENANT_ID = os.environ.get("AZURE_TENANT_ID")
+CLIENT_ID = os.environ.get("AZURE_CLIENT_ID")  # This is your app's client ID
+ALLOWED_DOMAINS = ["yourcompany.com"]  # Optional: restrict to org domain
 
 bp = Blueprint("routes", __name__, static_folder="static", template_folder="static")
 
@@ -114,14 +120,46 @@ MS_DEFENDER_ENABLED = os.environ.get("MS_DEFENDER_ENABLED", "true").lower() == "
 async def google_chat_webhook():
     try:
         request_json = await request.get_json()
+        sender = request_json.get("message", {}).get("sender", {})
+        user_email = sender.get("email", "")
+
+        if user_email not in authenticated_users:
+            login_url = "https://it-bot.azurewebsites.net/auth/login"
+            card = {
+                "cards": [
+                    {
+                        "header": {"title": "Authentication Required"},
+                        "sections": [
+                            {
+                                "widgets": [
+                                    {
+                                        "buttons": [
+                                            {
+                                                "textButton": {
+                                                    "text": "Sign in with Microsoft",
+                                                    "onClick": {
+                                                        "openLink": {
+                                                            "url": login_url
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        ]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+            return jsonify(card)
+
         event_type = request_json.get("type")
 
         if event_type == "MESSAGE":
-            # Extract user message and sender details
             user_message = request_json.get("message", {}).get("text", "")
             user_name = request_json.get("message", {}).get("sender", {}).get("displayName", "User")
 
-            # Prepare model arguments similar to /conversation
             model_args = {
                 "messages": [
                     {"role": "system", "content": app_settings.azure_openai.system_message},
@@ -134,7 +172,6 @@ async def google_chat_webhook():
                 "stop": app_settings.azure_openai.stop_sequence,
             }
 
-            # Include data sources if configured
             if app_settings.datasource:
                 model_args["extra_body"] = {
                     "data_sources": [
@@ -142,7 +179,6 @@ async def google_chat_webhook():
                     ]
                 }
 
-            # Call Azure OpenAI with prepared arguments
             azure_openai_client = await init_openai_client()
             response = await azure_openai_client.chat.completions.create(**model_args)
             response_text = response.choices[0].message.content.strip()
@@ -168,7 +204,6 @@ async def google_chat_webhook():
     except Exception as e:
         logging.exception("Error handling Google Chat webhook")
         return jsonify({"error": str(e)}), 500
-
 
 async def handle_google_chat_message(user_message, user_name):
     """
