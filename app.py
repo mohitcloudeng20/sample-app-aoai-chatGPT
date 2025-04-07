@@ -15,7 +15,6 @@ from quart import (
     render_template,
     current_app,
 )
-from jose import jwt
 
 from openai import AsyncAzureOpenAI
 from azure.identity.aio import (
@@ -41,48 +40,6 @@ bp = Blueprint("routes", __name__, static_folder="static", template_folder="stat
 
 cosmos_db_ready = asyncio.Event()
 
-async def validate_token(token):
-    try:
-        # Decode the token header to determine the issuer
-        token_header = jwt.get_unverified_header(token)
-        issuer = token_header.get("iss")
-
-        if issuer == "https://accounts.google.com":
-            # Validate Google token
-            google_key_url = "https://www.googleapis.com/oauth2/v3/certs"
-            google_audience = "YOUR_GOOGLE_CLIENT_ID"
-            decoded_token = jwt.decode(
-                token,
-                await fetch_jwks(google_key_url),
-                algorithms=["RS256"],
-                audience=google_audience,
-                issuer="https://accounts.google.com"
-            )
-        elif issuer == "https://login.microsoftonline.com/d2e7c801-ebde-478a-8094-73a9bce9a69c/v2.0":
-            # Validate Azure AD token
-            azure_ad_key_url = "https://login.microsoftonline.com/common/discovery/keys"
-            azure_ad_audience = "api://e32115d3-fda1-424d-b36a-935cb75f09af"
-            decoded_token = jwt.decode(
-                token,
-                await fetch_jwks(azure_ad_key_url),
-                algorithms=["RS256"],
-                audience=azure_ad_audience,
-                issuer="https://login.microsoftonline.com/d2e7c801-ebde-478a-8094-73a9bce9a69c/v2.0"
-            )
-        else:
-            raise ValueError("Unsupported token issuer")
-        
-        return decoded_token
-
-    except Exception as e:
-        logging.exception("Token validation failed", e)
-        return None
-
-async def fetch_jwks(jwks_url):
-    async with httpx.AsyncClient() as client:
-        response = await client.get(jwks_url)
-        response.raise_for_status()
-        return response.json()
 
 def create_app():
     app = Quart(__name__)
