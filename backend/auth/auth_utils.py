@@ -18,3 +18,16 @@ def get_authenticated_user_details(request_headers):
     user_object['aad_id_token'] = raw_user_object.get('X-Ms-Token-Aad-Id-Token')
 
     return user_object
+
+from functools import wraps
+from quart import request, jsonify
+
+def require_login(func):
+    @wraps(func)
+    async def wrapper(*args, **kwargs):
+        headers = request.headers
+        user_email = headers.get("X-User-Email")
+        if not user_email or user_email not in authenticated_users:
+            return jsonify({"error": "Unauthorized"}), 401
+        return await func(*args, **kwargs)
+    return wrapper
