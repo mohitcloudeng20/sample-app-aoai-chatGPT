@@ -154,6 +154,12 @@ async def google_chat_webhook():
             }
             return jsonify(card)
 
+        session = authenticated_users.get(user_email)
+        if not session or session["expires_at"] < time.time():
+        authenticated_users.pop(user_email, None)
+        return jsonify(sign_in_card)
+
+
         event_type = request_json.get("type")
 
         if event_type == "MESSAGE":
