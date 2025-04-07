@@ -11,7 +11,10 @@ REDIRECT_PATH = "/auth/callback"
 AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
 SCOPES = ["User.Read"]
 
-authenticated_users = {}  # TEMPORARY: Replace with Redis/Cosmos later
+authenticated_users[user_email] = {
+    "token": token,
+    "expires_at": time.time() + 3600  # 1 hour session
+}
 
 @bp_auth.route("/auth/login")
 async def login():
