@@ -16,3 +16,4 @@ google-auth-httplib2
 PyJWT>=2.6.0
 cryptography>=41.0.0
 requests>=2.31.0
+pip install google-auth
