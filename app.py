@@ -1,5 +1,7 @@
 import copy
 import json
+import time
+import logging
 import os
 import logging
 import uuid
@@ -16,7 +18,6 @@ from quart import (
     current_app,
 )
 
-from backend.auth.token_validator import validate_jwt
 from openai import AsyncAzureOpenAI
 from azure.identity.aio import (
     DefaultAzureCredential,
@@ -36,11 +37,8 @@ from backend.utils import (
     convert_to_pf_format,
     format_pf_non_streaming_response,
 )
-from backend.auth.oauth_routes import authenticated_users
 
-TENANT_ID = os.environ.get("AZURE_TENANT_ID")
-CLIENT_ID = os.environ.get("AZURE_CLIENT_ID")  # This is your app's client ID
-ALLOWED_DOMAINS = ["yourcompany.com"]  # Optional: restrict to org domain
+authenticated_users = {}
 
 bp = Blueprint("routes", __name__, static_folder="static", template_folder="static")
 
@@ -120,52 +118,52 @@ MS_DEFENDER_ENABLED = os.environ.get("MS_DEFENDER_ENABLED", "true").lower() == "
 async def google_chat_webhook():
     try:
         request_json = await request.get_json()
+        logging.info(f"Received event from Google Chat: {json.dumps(request_json)}")
+        logging.info(f"Event type: {request_json.get('type')}")
+
         sender = request_json.get("message", {}).get("sender", {})
         user_email = sender.get("email", "")
 
-        if user_email not in authenticated_users:
-            login_url = "https://it-bot.azurewebsites.net/auth/login"
-            card = {
-                "cards": [
-                    {
-                        "header": {"title": "Authentication Required"},
-                        "sections": [
-                            {
-                                "widgets": [
-                                    {
-                                        "buttons": [
-                                            {
-                                                "textButton": {
-                                                    "text": "Sign in with Microsoft",
-                                                    "onClick": {
-                                                        "openLink": {
-                                                            "url": login_url
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        ]
-                                    }
-                                ]
-                            }
-                        ]
-                    }
-                ]
-            }
-            return jsonify(card)
+        if not user_email:
+            logging.warning("No email provided in sender object.")
+            return jsonify({
+                "text": "Unable to identify the user. Please ensure you're using Google Workspace with email permissions enabled."
+            })
 
+        # Check if user is authenticated
         session = authenticated_users.get(user_email)
         if not session or session["expires_at"] < time.time():
-        authenticated_users.pop(user_email, None)
-        return jsonify(sign_in_card)
-
+            authenticated_users.pop(user_email, None)
+            login_url = "https://it-bot.azurewebsites.net/auth/login"
+            return jsonify({
+                "cards": [{
+                    "header": {"title": "Authentication Required"},
+                    "sections": [{
+                        "widgets": [{
+                            "buttons": [{
+                                "textButton": {
+                                    "text": "Sign in with Microsoft",
+                                    "onClick": {
+                                        "openLink": {
+                                            "url": login_url
+                                        }
+                                    }
+                                }
+                            }]
+                        }]
+                    }]
+                }],
+                "text": "Please [sign in with Microsoft](" + login_url + ") to continue."
+            })
 
         event_type = request_json.get("type")
 
         if event_type == "MESSAGE":
+            # Extract user message and sender details
             user_message = request_json.get("message", {}).get("text", "")
-            user_name = request_json.get("message", {}).get("sender", {}).get("displayName", "User")
+            user_name = sender.get("displayName", "User")
 
+            # Prepare model arguments
             model_args = {
                 "messages": [
                     {"role": "system", "content": app_settings.azure_openai.system_message},
@@ -200,7 +198,7 @@ async def google_chat_webhook():
             })
 
         elif event_type == "REMOVED_FROM_SPACE":
-            return jsonify({})
+            return jsonify({"text": "Bot removed. Hope to see you again!"})
 
         else:
             return jsonify({
