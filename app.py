@@ -44,6 +44,22 @@ bp = Blueprint("routes", __name__, static_folder="static", template_folder="stat
 
 cosmos_db_ready = asyncio.Event()
 
+async def verify_google_jwt(request):
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return None
+    token = auth_header[len("Bearer "):]
+
+    try:
+        # This verifies the token against Google's public certs
+        id_info = id_token.verify_oauth2_token(
+            token,
+            google_requests.Request()
+        )
+        return id_info  # Contains email, sub, name, etc.
+    except Exception as e:
+        logging.exception(f"JWT verification failed: {e}")
+        return None
 
 def create_app():
     app = Quart(__name__)
@@ -110,60 +126,29 @@ frontend_settings = {
     "oyd_enabled": app_settings.base_settings.datasource_type,
 }
 
-
 # Enable Microsoft Defender for Cloud Integration
 MS_DEFENDER_ENABLED = os.environ.get("MS_DEFENDER_ENABLED", "true").lower() == "true"
 
 @bp.route("/webhook", methods=["POST"])
 async def google_chat_webhook():
     try:
+        # ✅ Verify JWT
+        id_info = await verify_google_jwt(request)
+        if not id_info:
+            return jsonify({"text": "Authentication failed. Message not processed."}), 403
+
+        sender_email = id_info.get("email", "")
+        if not sender_email.endswith("@yourcompany.com"):  # <-- Your domain
+            return jsonify({"text": "Access denied. Only authorized users can chat with me."}), 403
+
+        # ✅ Continue processing valid users
         request_json = await request.get_json()
-        logging.info(f"Received event from Google Chat: {json.dumps(request_json)}")
-        logging.info(f"Event type: {request_json.get('type')}")
-
-        sender = request_json.get("message", {}).get("sender", {})
-        user_email = sender.get("email", "")
-
-        if not user_email:
-            logging.warning("No email provided in sender object.")
-            return jsonify({
-                "text": "Unable to identify the user. Please ensure you're using Google Workspace with email permissions enabled."
-            })
-
-        # Check if user is authenticated
-        session = authenticated_users.get(user_email)
-        if not session or session["expires_at"] < time.time():
-            authenticated_users.pop(user_email, None)
-            login_url = "https://it-bot.azurewebsites.net/auth/login"
-            return jsonify({
-                "cards": [{
-                    "header": {"title": "Authentication Required"},
-                    "sections": [{
-                        "widgets": [{
-                            "buttons": [{
-                                "textButton": {
-                                    "text": "Sign in with Microsoft",
-                                    "onClick": {
-                                        "openLink": {
-                                            "url": login_url
-                                        }
-                                    }
-                                }
-                            }]
-                        }]
-                    }]
-                }],
-                "text": "Please [sign in with Microsoft](" + login_url + ") to continue."
-            })
-
         event_type = request_json.get("type")
 
         if event_type == "MESSAGE":
-            # Extract user message and sender details
             user_message = request_json.get("message", {}).get("text", "")
-            user_name = sender.get("displayName", "User")
+            user_name = request_json.get("message", {}).get("sender", {}).get("displayName", "User")
 
-            # Prepare model arguments
             model_args = {
                 "messages": [
                     {"role": "system", "content": app_settings.azure_openai.system_message},
@@ -187,23 +172,17 @@ async def google_chat_webhook():
             response = await azure_openai_client.chat.completions.create(**model_args)
             response_text = response.choices[0].message.content.strip()
 
-            return jsonify({
-                "text": response_text
-            })
+            return jsonify({"text": response_text})
 
         elif event_type == "ADDED_TO_SPACE":
             space_name = request_json.get("space", {}).get("name", "unknown space")
-            return jsonify({
-                "text": f"Thanks for adding me to {space_name}!"
-            })
+            return jsonify({"text": f"Thanks for adding me to {space_name}!"})
 
         elif event_type == "REMOVED_FROM_SPACE":
-            return jsonify({"text": "Bot removed. Hope to see you again!"})
+            return jsonify({})
 
         else:
-            return jsonify({
-                "text": "I didn't understand that event type."
-            })
+            return jsonify({"text": "Unrecognized event type."})
 
     except Exception as e:
         logging.exception("Error handling Google Chat webhook")
