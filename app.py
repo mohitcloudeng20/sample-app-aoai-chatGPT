@@ -1,3 +1,6 @@
+from msal import ConfidentialClientApplication
+import requests
+import os
 import copy
 import json
 import time
@@ -37,6 +40,49 @@ from backend.utils import (
     convert_to_pf_format,
     format_pf_non_streaming_response,
 )
+
+def get_user_graph_data():
+    client_id = os.environ.get("MSAL_CLIENT_ID")
+    tenant_id = os.environ.get("MSAL_TENANT_ID")
+    client_secret = os.environ.get("MSAL_CLIENT_SECRET")
+
+    authority = f"https://login.microsoftonline.com/{tenant_id}"
+    scopes = ["https://graph.microsoft.com/.default"]
+
+    app = ConfidentialClientApplication(
+        client_id=client_id,
+        authority=authority,
+        client_credential=client_secret
+    )
+
+    token_response = app.acquire_token_for_client(scopes=scopes)
+
+    if "access_token" not in token_response:
+        print("Error acquiring token:", token_response)
+        return {}
+
+    access_token = token_response["access_token"]
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    # Use a real user ID or email here — temporary placeholder:
+    user_id = "user@yourdomain.com"
+
+    user_profile = requests.get(
+        f"https://graph.microsoft.com/v1.0/users/{user_id}",
+        headers=headers
+    ).json()
+
+    group_info = requests.get(
+        f"https://graph.microsoft.com/v1.0/users/{user_id}/memberOf",
+        headers=headers
+    ).json()
+
+    return {
+        "displayName": user_profile.get("displayName"),
+        "lastPasswordChange": user_profile.get("passwordProfile", {}).get("lastPasswordChangeDateTime"),
+        "groups": [g.get("displayName") for g in group_info.get("value", []) if "displayName" in g]
+    }
+
 
 authenticated_users = {}
 
