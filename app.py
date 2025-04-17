@@ -537,26 +537,35 @@ async def conversation():
         user_principal_name = authenticated_user["user_principal_name"]
 
         try:
+            logging.debug(f"Fetching details for user: {user_principal_name}")
             user_details = await get_user_details(user_principal_name)
 
-            if user_details and "passwordPolicies" in user_details:
-                if "DisablePasswordExpiration" in user_details["passwordPolicies"]:
-                    return jsonify({
-                        "messages": [
-                            {"role": "assistant", "content": "Your password never expires."}
-                        ]
-                    })
+            if user_details:
+                logging.debug(f"User details: {user_details}")
+                if "passwordPolicies" in user_details:
+                    if "DisablePasswordExpiration" in user_details["passwordPolicies"]:
+                        return jsonify({
+                            "messages": [
+                                {"role": "assistant", "content": "Your password never expires."}
+                            ]
+                        })
+                    else:
+                        # Optionally calculate the expiration date here
+                        return jsonify({
+                            "messages": [
+                                {"role": "assistant", "content": "Your password expires periodically. Please check with your administrator for more details."}
+                            ]
+                        })
                 else:
-                    # Optionally calculate the expiration date here
                     return jsonify({
                         "messages": [
-                            {"role": "assistant", "content": "Your password expires periodically. Please check with your administrator for more details."}
+                            {"role": "assistant", "content": "I couldn't find your password expiration details."}
                         ]
                     })
             else:
                 return jsonify({
                     "messages": [
-                        {"role": "assistant", "content": "I couldn't find your password expiration details."}
+                        {"role": "assistant", "content": "I couldn't find your user details."}
                     ]
                 })
 
