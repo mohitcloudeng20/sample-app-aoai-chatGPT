@@ -523,24 +523,23 @@ async def conversation_internal(request_body, request_headers):
         else:
             return jsonify({"error": str(ex)}), 500
 
-
 @bp.route("/conversation", methods=["POST"])
 async def conversation():
     if not request.is_json:
         return jsonify({"error": "request must be json"}), 415
-    
+
     request_json = await request.get_json()
     user_message = request_json.get("messages", [])[-1].get("content", "").lower()
 
     # Check if the user is asking about password expiration
-    if "password expiration" in user_message:
+    if "password expiration" in user_message or "password expiration date" in user_message:
         authenticated_user = get_authenticated_user_details(request_headers=request.headers)
         user_principal_name = authenticated_user["user_principal_name"]
-        
+
         try:
             user_details = await get_user_details(user_principal_name)
+
             if user_details and "passwordPolicies" in user_details:
-                # Check if the user's password never expires
                 if "DisablePasswordExpiration" in user_details["passwordPolicies"]:
                     return jsonify({
                         "messages": [
@@ -548,6 +547,7 @@ async def conversation():
                         ]
                     })
                 else:
+                    # Optionally calculate the expiration date here
                     return jsonify({
                         "messages": [
                             {"role": "assistant", "content": "Your password expires periodically. Please check with your administrator for more details."}
@@ -559,6 +559,7 @@ async def conversation():
                         {"role": "assistant", "content": "I couldn't find your password expiration details."}
                     ]
                 })
+
         except Exception as e:
             logging.exception("Error fetching password expiration details")
             return jsonify({
