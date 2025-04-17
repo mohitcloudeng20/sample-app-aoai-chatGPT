@@ -1004,6 +1004,20 @@ async def ensure_cosmos():
 
 
 async def generate_title(conversation_messages) -> str:
+graph_info = get_user_graph_data()
+display_name = graph_info.get("displayName", "User")
+last_change = graph_info.get("lastPasswordChange", "Unknown")
+group_list = ", ".join(graph_info.get("groups", []))
+
+enriched_prompt = f"""
+User Info:
+- Name: {display_name}
+- Last Password Change: {last_change}
+- Groups: {group_list}
+
+Question: {data.get('input')}
+"""
+
     ## make sure the messages are sorted by _ts descending
     title_prompt = "Summarize the conversation so far into a 4-word or less title. Do not use any quotation marks or punctuation. Do not include any other commentary or description."
 
