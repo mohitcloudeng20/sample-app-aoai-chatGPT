@@ -6,6 +6,7 @@ import logging
 import uuid
 import httpx
 import asyncio
+from datetime import datetime, timedelta
 from quart import (
     Blueprint,
     Quart,
@@ -541,34 +542,29 @@ async def conversation():
             user_details = await get_user_details(user_principal_name)
 
             if user_details:
-                logging.debug(f"User details: {user_details}")
-                if "passwordPolicies" in user_details:
-                    if "DisablePasswordExpiration" in user_details["passwordPolicies"]:
-                        return jsonify({
-                            "messages": [
-                                {"role": "assistant", "content": "Your password never expires."}
-                            ]
-                        })
-                    else:
-                        # Optionally calculate the expiration date here
-                        return jsonify({
-                            "messages": [
-                                {"role": "assistant", "content": "Your password expires periodically. Please check with your administrator for more details."}
-                            ]
-                        })
-                else:
-                    return jsonify({
-                        "messages": [
-                            {"role": "assistant", "content": "I couldn't find your password expiration details."}
-                        ]
-                    })
-            else:
-                return jsonify({
-                    "messages": [
-                        {"role": "assistant", "content": "I couldn't find your user details."}
-                    ]
-                })
+    if "DisablePasswordExpiration" in user_details.get("passwordPolicies", ""):
+        return jsonify({
+            "messages": [
+                {"role": "assistant", "content": "Your password never expires."}
+            ]
+        })
+    elif "lastPasswordChangeDateTime" in user_details:
+        last_change = user_details["lastPasswordChangeDateTime"]
+        last_change_dt = datetime.fromisoformat(last_change.rstrip("Z"))
+        expiration_date = last_change_dt + timedelta(days=180)
+        expiration_str = expiration_date.strftime("%B %d, %Y")
 
+        return jsonify({
+            "messages": [
+                {"role": "assistant", "content": f"Your password will expire on **{expiration_str}**."}
+            ]
+        })
+    else:
+        return jsonify({
+            "messages": [
+                {"role": "assistant", "content": "I couldn't find your password expiration details."}
+            ]
+        })
         except Exception as e:
             logging.exception("Error fetching password expiration details")
             return jsonify({
