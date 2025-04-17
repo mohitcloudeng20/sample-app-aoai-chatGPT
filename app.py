@@ -1,10 +1,6 @@
-from msal import ConfidentialClientApplication
-import requests
-import os
 import copy
+import aiohttp
 import json
-import time
-import logging
 import os
 import logging
 import uuid
@@ -41,71 +37,49 @@ from backend.utils import (
     format_pf_non_streaming_response,
 )
 
-def get_user_graph_data():
-    client_id = os.environ.get("MSAL_CLIENT_ID")
-    tenant_id = os.environ.get("MSAL_TENANT_ID")
-    client_secret = os.environ.get("MSAL_CLIENT_SECRET")
-
-    authority = f"https://login.microsoftonline.com/{tenant_id}"
-    scopes = ["https://graph.microsoft.com/.default"]
-
-    app = ConfidentialClientApplication(
-        client_id=client_id,
-        authority=authority,
-        client_credential=client_secret
-    )
-
-    token_response = app.acquire_token_for_client(scopes=scopes)
-
-    if "access_token" not in token_response:
-        print("Error acquiring token:", token_response)
-        return {}
-
-    access_token = token_response["access_token"]
-    headers = {"Authorization": f"Bearer {access_token}"}
-
-    # Use a real user ID or email here — temporary placeholder:
-    user_id = "user@yourdomain.com"
-
-    user_profile = requests.get(
-        f"https://graph.microsoft.com/v1.0/users/{user_id}",
-        headers=headers
-    ).json()
-
-    group_info = requests.get(
-        f"https://graph.microsoft.com/v1.0/users/{user_id}/memberOf",
-        headers=headers
-    ).json()
-
-    return {
-        "displayName": user_profile.get("displayName"),
-        "lastPasswordChange": user_profile.get("passwordProfile", {}).get("lastPasswordChangeDateTime"),
-        "groups": [g.get("displayName") for g in group_info.get("value", []) if "displayName" in g]
-    }
-
-
-authenticated_users = {}
-
 bp = Blueprint("routes", __name__, static_folder="static", template_folder="static")
 
 cosmos_db_ready = asyncio.Event()
 
-async def verify_google_jwt(request):
-    auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
-        return None
-    token = auth_header[len("Bearer "):]
+async def get_user_details(user_principal_name):
+    graph_url = f"https://graph.microsoft.com/v1.0/users/{user_principal_name}"
+    token = await get_ms_graph_token()  # Function to get an access token
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.get(graph_url, headers=headers) as response:
+            if response.status == 200:
+                return await response.json()
+            else:
+                logging.error(f"Error fetching user details: {response.status}")
+                return None
 
-    try:
-        # This verifies the token against Google's public certs
-        id_info = id_token.verify_oauth2_token(
-            token,
-            google_requests.Request()
-        )
-        return id_info  # Contains email, sub, name, etc.
-    except Exception as e:
-        logging.exception(f"JWT verification failed: {e}")
-        return None
+# Add a function to get an access token for Microsoft Graph
+async def get_ms_graph_token():
+    tenant_id = app_settings.ms_graph.tenant_id
+    client_id = app_settings.ms_graph.client_id
+    client_secret = app_settings.ms_graph.client_secret
+    scope = "https://graph.microsoft.com/.default"
+    token_url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+    
+    payload = {
+        "client_id": client_id,
+        "scope": scope,
+        "client_secret": client_secret,
+        "grant_type": "client_credentials"
+    }
+    
+    async with aiohttp.ClientSession() as session:
+        async with session.post(token_url, data=payload) as response:
+            if response.status == 200:
+                token_data = await response.json()
+                return token_data["access_token"]
+            else:
+                logging.error(f"Error fetching token: {response.status}")
+                return None
+
 
 def create_app():
     app = Quart(__name__)
@@ -172,29 +146,22 @@ frontend_settings = {
     "oyd_enabled": app_settings.base_settings.datasource_type,
 }
 
+
 # Enable Microsoft Defender for Cloud Integration
 MS_DEFENDER_ENABLED = os.environ.get("MS_DEFENDER_ENABLED", "true").lower() == "true"
 
 @bp.route("/webhook", methods=["POST"])
 async def google_chat_webhook():
     try:
-        # ✅ Verify JWT
-        id_info = await verify_google_jwt(request)
-        if not id_info:
-            return jsonify({"text": "Authentication failed. Message not processed."}), 403
-
-        sender_email = id_info.get("email", "")
-        if not sender_email.endswith("@yourcompany.com"):  # <-- Your domain
-            return jsonify({"text": "Access denied. Only authorized users can chat with me."}), 403
-
-        # ✅ Continue processing valid users
         request_json = await request.get_json()
         event_type = request_json.get("type")
 
         if event_type == "MESSAGE":
+            # Extract user message and sender details
             user_message = request_json.get("message", {}).get("text", "")
             user_name = request_json.get("message", {}).get("sender", {}).get("displayName", "User")
 
+            # Prepare model arguments similar to /conversation
             model_args = {
                 "messages": [
                     {"role": "system", "content": app_settings.azure_openai.system_message},
@@ -207,6 +174,7 @@ async def google_chat_webhook():
                 "stop": app_settings.azure_openai.stop_sequence,
             }
 
+            # Include data sources if configured
             if app_settings.datasource:
                 model_args["extra_body"] = {
                     "data_sources": [
@@ -214,25 +182,33 @@ async def google_chat_webhook():
                     ]
                 }
 
+            # Call Azure OpenAI with prepared arguments
             azure_openai_client = await init_openai_client()
             response = await azure_openai_client.chat.completions.create(**model_args)
             response_text = response.choices[0].message.content.strip()
 
-            return jsonify({"text": response_text})
+            return jsonify({
+                "text": response_text
+            })
 
         elif event_type == "ADDED_TO_SPACE":
             space_name = request_json.get("space", {}).get("name", "unknown space")
-            return jsonify({"text": f"Thanks for adding me to {space_name}!"})
+            return jsonify({
+                "text": f"Thanks for adding me to {space_name}!"
+            })
 
         elif event_type == "REMOVED_FROM_SPACE":
             return jsonify({})
 
         else:
-            return jsonify({"text": "Unrecognized event type."})
+            return jsonify({
+                "text": "I didn't understand that event type."
+            })
 
     except Exception as e:
         logging.exception("Error handling Google Chat webhook")
         return jsonify({"error": str(e)}), 500
+
 
 async def handle_google_chat_message(user_message, user_name):
     """
@@ -552,10 +528,47 @@ async def conversation_internal(request_body, request_headers):
 async def conversation():
     if not request.is_json:
         return jsonify({"error": "request must be json"}), 415
+    
     request_json = await request.get_json()
+    user_message = request_json.get("messages", [])[-1].get("content", "").lower()
 
+    # Check if the user is asking about password expiration
+    if "password expiration" in user_message:
+        authenticated_user = get_authenticated_user_details(request_headers=request.headers)
+        user_principal_name = authenticated_user["user_principal_name"]
+        
+        try:
+            user_details = await get_user_details(user_principal_name)
+            if user_details and "passwordPolicies" in user_details:
+                # Check if the user's password never expires
+                if "DisablePasswordExpiration" in user_details["passwordPolicies"]:
+                    return jsonify({
+                        "messages": [
+                            {"role": "assistant", "content": "Your password never expires."}
+                        ]
+                    })
+                else:
+                    return jsonify({
+                        "messages": [
+                            {"role": "assistant", "content": "Your password expires periodically. Please check with your administrator for more details."}
+                        ]
+                    })
+            else:
+                return jsonify({
+                    "messages": [
+                        {"role": "assistant", "content": "I couldn't find your password expiration details."}
+                    ]
+                })
+        except Exception as e:
+            logging.exception("Error fetching password expiration details")
+            return jsonify({
+                "messages": [
+                    {"role": "assistant", "content": "An error occurred while fetching your password expiration details."}
+                ]
+            })
+
+    # Handle other messages as usual
     return await conversation_internal(request_json, request.headers)
-
 
 @bp.route("/frontend_settings", methods=["GET"])
 def get_frontend_settings():
@@ -1004,20 +1017,6 @@ async def ensure_cosmos():
 
 
 async def generate_title(conversation_messages) -> str:
-graph_info = get_user_graph_data()
-display_name = graph_info.get("displayName", "User")
-last_change = graph_info.get("lastPasswordChange", "Unknown")
-group_list = ", ".join(graph_info.get("groups", []))
-
-enriched_prompt = f"""
-User Info:
-- Name: {display_name}
-- Last Password Change: {last_change}
-- Groups: {group_list}
-
-Question: {data.get('input')}
-"""
-
     ## make sure the messages are sorted by _ts descending
     title_prompt = "Summarize the conversation so far into a 4-word or less title. Do not use any quotation marks or punctuation. Do not include any other commentary or description."
 
