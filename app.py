@@ -1,12 +1,10 @@
 import copy
-import aiohttp
 import json
 import os
 import logging
 import uuid
 import httpx
 import asyncio
-from datetime import datetime, timedelta
 from quart import (
     Blueprint,
     Quart,
@@ -41,45 +39,6 @@ from backend.utils import (
 bp = Blueprint("routes", __name__, static_folder="static", template_folder="static")
 
 cosmos_db_ready = asyncio.Event()
-
-async def get_user_details(user_principal_name):
-    graph_url = f"https://graph.microsoft.com/v1.0/users/{user_principal_name}"
-    token = await get_ms_graph_token()  # Function to get an access token
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json"
-    }
-    async with aiohttp.ClientSession() as session:
-        async with session.get(graph_url, headers=headers) as response:
-            if response.status == 200:
-                return await response.json()
-            else:
-                logging.error(f"Error fetching user details: {response.status}")
-                return None
-
-# Add a function to get an access token for Microsoft Graph
-async def get_ms_graph_token():
-    tenant_id = app_settings.ms_graph.tenant_id
-    client_id = app_settings.ms_graph.client_id
-    client_secret = app_settings.ms_graph.client_secret
-    scope = "https://graph.microsoft.com/.default"
-    token_url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
-    
-    payload = {
-        "client_id": client_id,
-        "scope": scope,
-        "client_secret": client_secret,
-        "grant_type": "client_credentials"
-    }
-    
-    async with aiohttp.ClientSession() as session:
-        async with session.post(token_url, data=payload) as response:
-            if response.status == 200:
-                token_data = await response.json()
-                return token_data["access_token"]
-            else:
-                logging.error(f"Error fetching token: {response.status}")
-                return None
 
 
 def create_app():
@@ -524,57 +483,15 @@ async def conversation_internal(request_body, request_headers):
         else:
             return jsonify({"error": str(ex)}), 500
 
+
 @bp.route("/conversation", methods=["POST"])
 async def conversation():
     if not request.is_json:
         return jsonify({"error": "request must be json"}), 415
-
     request_json = await request.get_json()
-    user_message = request_json.get("messages", [])[-1].get("content", "").lower()
 
-    # Check if the user is asking about password expiration
-    if "password expiration" in user_message or "password expiration date" in user_message:
-        authenticated_user = get_authenticated_user_details(request_headers=request.headers)
-        user_principal_name = authenticated_user["user_principal_name"]
-
-        try:
-            logging.debug(f"Fetching details for user: {user_principal_name}")
-            user_details = await get_user_details(user_principal_name)
-
-            if user_details:
-    if "DisablePasswordExpiration" in user_details.get("passwordPolicies", ""):
-        return jsonify({
-            "messages": [
-                {"role": "assistant", "content": "Your password never expires."}
-            ]
-        })
-    elif "lastPasswordChangeDateTime" in user_details:
-        last_change = user_details["lastPasswordChangeDateTime"]
-        last_change_dt = datetime.fromisoformat(last_change.rstrip("Z"))
-        expiration_date = last_change_dt + timedelta(days=180)
-        expiration_str = expiration_date.strftime("%B %d, %Y")
-
-        return jsonify({
-            "messages": [
-                {"role": "assistant", "content": f"Your password will expire on **{expiration_str}**."}
-            ]
-        })
-    else:
-        return jsonify({
-            "messages": [
-                {"role": "assistant", "content": "I couldn't find your password expiration details."}
-            ]
-        })
-        except Exception as e:
-            logging.exception("Error fetching password expiration details")
-            return jsonify({
-                "messages": [
-                    {"role": "assistant", "content": "An error occurred while fetching your password expiration details."}
-                ]
-            })
-
-    # Handle other messages as usual
     return await conversation_internal(request_json, request.headers)
+
 
 @bp.route("/frontend_settings", methods=["GET"])
 def get_frontend_settings():
