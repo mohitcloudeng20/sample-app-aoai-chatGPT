@@ -16,7 +16,7 @@ def verify_google_chat_request():
     request_adapter = grequests.Request()
 
     try:
-        info = jwt.decode(token, request_adapter, audience="YOUR_GOOGLE_CHAT_BOT_URL")
+        info = jwt.decode(token, request_adapter, audience="289699427690")
         return info  # You could use fields like info['sub'] later if needed
     except Exception as e:
         print(f"Token verification failed: {e}")
