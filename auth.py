@@ -10,7 +10,7 @@ GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
 
 # Replace with your real values!
-REDIRECT_URI = "https://yourdomain.com/oauth2callback"
+REDIRECT_URI = "https://it-bot.azurewebsites.net/oauth2callback"
 
 @auth_bp.route("/login")
 def login():
