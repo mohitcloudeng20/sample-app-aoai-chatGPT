@@ -15,6 +15,9 @@ from quart import (
     render_template,
     current_app,
 )
+from flask import Flask, request, session, jsonify, abort
+from auth import auth_bp
+from google_verify import verify_google_chat_request
 
 from openai import AsyncAzureOpenAI
 from azure.identity.aio import (
@@ -40,6 +43,35 @@ bp = Blueprint("routes", __name__, static_folder="static", template_folder="stat
 
 cosmos_db_ready = asyncio.Event()
 
+app = Flask(__name__)
+app.secret_key = os.getenv("FLASK_SECRET_KEY", "super-secret-key")
+app.register_blueprint(auth_bp)
+
+@app.route("/")
+def home():
+    if "email" not in session:
+        return '<a href="/login">Sign in with Google</a>'
+    return f"Hello, {session['email']}"
+
+@app.route("/chat", methods=["POST"])
+def chat():
+    # Step 1: Verify that this is a real Google Chat bot request
+    verify_google_chat_request()
+
+    # Step 2: Ensure user is authenticated
+    if "email" not in session:
+        return jsonify({"text": "Please [sign in first](https://yourdomain.com/login) to chat with me."})
+
+    # Step 3: Process chat request
+    incoming_message = request.json.get('message', {}).get('text', '')
+
+    # Echo back (for now)
+    return jsonify({
+        "text": f"You said: {incoming_message}. Thanks {session['email']}!"
+    })
+
+if __name__ == "__main__":
+    app.run(port=5000, debug=True)
 
 def create_app():
     app = Quart(__name__)
