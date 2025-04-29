@@ -15,9 +15,57 @@ from quart import (
     render_template,
     current_app,
 )
-from flask import Flask, request, session, jsonify, abort
-from auth import auth_bp
-from google_verify import verify_google_chat_request
+import os
+from flask import Flask, request, session, redirect, jsonify
+from auth import auth_bp  # Import your OAuth blueprint
+from google_verify import verify_google_chat_request  # JWT validation
+
+# Create Flask app
+app = Flask(__name__)
+app.secret_key = os.getenv("FLASK_SECRET_KEY", "super-secret-dev-key")
+
+# Register authentication blueprint
+app.register_blueprint(auth_bp)
+
+# Force HTTPS redirect (optional but good)
+@app.before_request
+def before_request():
+    if not request.is_secure and not app.debug:
+        url = request.url.replace('http://', 'https://', 1)
+        return redirect(url, code=301)
+
+# Home page
+@app.route("/")
+def home():
+    if "email" not in session:
+        return redirect("/login")  # If not logged in, redirect to login
+    return f"✅ Hello, {session['email']}! You are authenticated."
+
+# Login and OAuth handled via auth.py blueprint
+
+# Google Chat endpoint
+@app.route("/chat", methods=["POST"])
+def chat():
+    # Step 1: Verify Google Chat JWT
+    verify_google_chat_request()
+
+    # Step 2: Check if user is authenticated
+    if "email" not in session:
+        return jsonify({
+            "text": "❗ Please [sign in first](https://it-bot.azurewebsites.net/login) to chat with me."
+        })
+
+    # Step 3: Process incoming chat message
+    incoming_message = request.json.get('message', {}).get('text', '')
+
+    # Step 4: Echo back the message (you can replace this with Azure OpenAI logic)
+    return jsonify({
+        "text": f"👋 You said: '{incoming_message}'. Thank you, {session['email']}!"
+    })
+
+# Start app
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True)
 
 from openai import AsyncAzureOpenAI
 from azure.identity.aio import (
@@ -43,35 +91,6 @@ bp = Blueprint("routes", __name__, static_folder="static", template_folder="stat
 
 cosmos_db_ready = asyncio.Event()
 
-app = Flask(__name__)
-app.secret_key = os.getenv("FLASK_SECRET_KEY", "super-secret-key")
-app.register_blueprint(auth_bp)
-
-@app.route("/")
-def home():
-    if "email" not in session:
-        return '<a href="/login">Sign in with Google</a>'
-    return f"Hello, {session['email']}"
-
-@app.route("/chat", methods=["POST"])
-def chat():
-    # Step 1: Verify that this is a real Google Chat bot request
-    verify_google_chat_request()
-
-    # Step 2: Ensure user is authenticated
-    if "email" not in session:
-        return jsonify({"text": "Please [sign in first](https://yourdomain.com/login) to chat with me."})
-
-    # Step 3: Process chat request
-    incoming_message = request.json.get('message', {}).get('text', '')
-
-    # Echo back (for now)
-    return jsonify({
-        "text": f"You said: {incoming_message}. Thanks {session['email']}!"
-    })
-
-if __name__ == "__main__":
-    app.run(port=5000, debug=True)
 
 def create_app():
     app = Quart(__name__)
