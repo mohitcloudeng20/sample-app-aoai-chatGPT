@@ -52,6 +52,9 @@ def create_app():
     app.config["TEMPLATES_AUTO_RELOAD"] = True
     return app
 
+@bp.route("/login")
+async def login():
+    return quart.redirect("/.auth/login/google")
 
 @bp.route("/")
 async def home():
@@ -59,7 +62,7 @@ async def home():
         user_email = get_user_email()
         return f"✅ Hello, {user_email}! You are authenticated via Google Login (Azure Easy Auth)."
     else:
-        return "❗ You are not signed in. (Anonymous Access)"
+        return quart.redirect("/login")
 
 @bp.route("/favicon.ico")
 async def favicon():
