@@ -35,6 +35,15 @@ from backend.utils import (
     format_pf_non_streaming_response,
 )
 
+# Azure Easy Auth helper functions
+def is_authenticated():
+    """Check if Azure Easy Auth has authenticated the user."""
+    return bool(request.headers.get('X-MS-CLIENT-PRINCIPAL-ID'))
+
+def get_user_email():
+    """Get user email from Azure Easy Auth headers."""
+    return request.headers.get('X-MS-CLIENT-PRINCIPAL-NAME', 'Anonymous')
+
 bp = Blueprint("routes", __name__, static_folder="static", template_folder="static")
 
 def create_app():
@@ -45,13 +54,12 @@ def create_app():
 
 
 @bp.route("/")
-async def index():
-    return await render_template(
-        "index.html",
-        title=app_settings.ui.title,
-        favicon=app_settings.ui.favicon
-    )
-
+async def home():
+    if is_authenticated():
+        user_email = get_user_email()
+        return f"✅ Hello, {user_email}! You are authenticated via Google Login (Azure Easy Auth)."
+    else:
+        return "❗ You are not signed in. (Anonymous Access)"
 
 @bp.route("/favicon.ico")
 async def favicon():
