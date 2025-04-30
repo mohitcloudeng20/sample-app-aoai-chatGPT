@@ -15,6 +15,8 @@ from quart import (
     render_template,
     current_app,
 )
+import re
+from datetime import datetime, timedelta
 
 from openai import AsyncAzureOpenAI
 from azure.identity.aio import (
@@ -35,31 +37,64 @@ from backend.utils import (
     convert_to_pf_format,
     format_pf_non_streaming_response,
 )
-from google.auth import jwt
-import logging
+# Azure AD / MS Graph
+from azure.identity.aio import DefaultAzureCredential
+from msgraph.core import GraphClient
 
-# Constants for Google Chat verification
-GOOGLE_CHAT_CERTS_URL = (
-    "https://www.googleapis.com/service_accounts/v1/metadata/"
-    "x509/chat@system.gserviceaccount.com"
+# Your own auth helper
+from backend.auth import get_authenticated_user_details
+
+PASSWORD_EXPIRE_RE = re.compile(
+    r"\bwhen\s+does\s+(?:my\s+password|the\s+password\s+for\s+user\s+(?P<target>\w+))\s+expire\??",
+    re.IGNORECASE
 )
-GOOGLE_CHAT_CLIENT_ID = (
-    "185257238474-vqo558j115fpunbi2kooqc8nv675q2rv.apps.googleusercontent.com"
-)
 
-# Verify requests from Google Chat
-def verify_google_chat_request(request):
-    auth_header = request.headers.get("Authorization")
-    if not auth_header:
-        return False
+def parse_password_expiry_intent(message_text: str):
+    m = PASSWORD_EXPIRE_RE.search(message_text)
+    if not m:
+        return None
+    return {"target": m.group("target")}
 
-    token = auth_header.split("Bearer ")[-1]
-    try:
-        info = jwt.decode(token, certs_url=GOOGLE_CHAT_CERTS_URL)
-        return info["iss"] == "chat@system.gserviceaccount.com"
-    except Exception as e:
-        logging.error(f"Failed to verify Google Chat request: {e}")
-        return False
+async def fetch_last_password_set_date(user_upn: str) -> datetime | None:
+    cred = DefaultAzureCredential()
+    client = GraphClient(credential=cred)
+    resp = await client.get(
+        f"/users/{user_upn}?$select=lastPasswordChangeDateTime"
+    )
+    data = resp.json()
+    iso = data.get("lastPasswordChangeDateTime")
+    return None if not iso else datetime.fromisoformat(iso.replace("Z", "+00:00"))
+
+PASSWORD_LIFETIME_DAYS = 180
+
+async def handle_password_expiry(request, message_text):
+    user = await get_authenticated_user_details(request)
+    intent = parse_password_expiry_intent(message_text)
+    if not intent:
+        return None
+
+    target = intent["target"] or user["id"]
+    if target != user["id"] and "admin" not in user.get("roles", []):
+        return {
+            "role": "assistant",
+            "content": "⚠️ You’re not allowed to check other users’ passwords. You can only see *your* expiry date."
+        }
+
+    last_set = await fetch_last_password_set_date(target)
+    if last_set is None:
+        return {
+            "role": "assistant",
+            "content": f"❓ I can’t find any password record for **{target}**."
+        }
+
+    expiry = last_set + timedelta(days=PASSWORD_LIFETIME_DAYS)
+    return {
+        "role": "assistant",
+        "content": (
+            f"🔒 Password for **{target}** was last set on "
+            f"{last_set.date()}, so it will expire on **{expiry.date()}**."
+        )
+    }
 
 bp = Blueprint("routes", __name__, static_folder="static", template_folder="static")
 
@@ -137,37 +172,63 @@ MS_DEFENDER_ENABLED = os.environ.get("MS_DEFENDER_ENABLED", "true").lower() == "
 
 @bp.route("/webhook", methods=["POST"])
 async def google_chat_webhook():
-    # Verify that the request is from Google Chat
-    if not verify_google_chat_request(request):
-        return jsonify({"error": "Unauthorized"}), 401
-
-    # Parse the incoming request from Google Chat
-    event = await request.get_json()
-    user_message = event.get("message", {}).get("text", "Hello")
-
-    # Process the user message with Azure OpenAI
-    response_text = await process_gpt_message(user_message)
-
-    # Respond back to Google Chat
-    return jsonify({"text": response_text})
-    
-    # Process messages using Azure OpenAI
-async def process_gpt_message(user_message):
     try:
-        # Prepare model arguments
-        model_args = prepare_model_args(
-            {
-                "messages": [{"role": "user", "content": user_message}],
-            },
-            {}
-        )
+        request_json = await request.get_json()
+        event_type = request_json.get("type")
 
-        # Send the message to Azure OpenAI
-        response, _ = await send_chat_request(model_args, {})
-        return response["choices"][0]["message"]["content"]
+        if event_type == "MESSAGE":
+            # Extract user message and sender details
+            user_message = request_json.get("message", {}).get("text", "")
+            user_name = request_json.get("message", {}).get("sender", {}).get("displayName", "User")
+
+            # Prepare model arguments similar to /conversation
+            model_args = {
+                "messages": [
+                    {"role": "system", "content": app_settings.azure_openai.system_message},
+                    {"role": "user", "content": user_message},
+                ],
+                "model": app_settings.azure_openai.model,
+                "max_tokens": app_settings.azure_openai.max_tokens,
+                "temperature": app_settings.azure_openai.temperature,
+                "top_p": app_settings.azure_openai.top_p,
+                "stop": app_settings.azure_openai.stop_sequence,
+            }
+
+            # Include data sources if configured
+            if app_settings.datasource:
+                model_args["extra_body"] = {
+                    "data_sources": [
+                        app_settings.datasource.construct_payload_configuration(request=request)
+                    ]
+                }
+
+            # Call Azure OpenAI with prepared arguments
+            azure_openai_client = await init_openai_client()
+            response = await azure_openai_client.chat.completions.create(**model_args)
+            response_text = response.choices[0].message.content.strip()
+
+            return jsonify({
+                "text": response_text
+            })
+
+        elif event_type == "ADDED_TO_SPACE":
+            space_name = request_json.get("space", {}).get("name", "unknown space")
+            return jsonify({
+                "text": f"Thanks for adding me to {space_name}!"
+            })
+
+        elif event_type == "REMOVED_FROM_SPACE":
+            return jsonify({})
+
+        else:
+            return jsonify({
+                "text": "I didn't understand that event type."
+            })
+
     except Exception as e:
-        logging.error(f"Failed to process GPT message: {e}")
-        return "Sorry, something went wrong."
+        logging.exception("Error handling Google Chat webhook")
+        return jsonify({"error": str(e)}), 500
+
 
 async def handle_google_chat_message(user_message, user_name):
     """
@@ -487,8 +548,17 @@ async def conversation_internal(request_body, request_headers):
 async def conversation():
     if not request.is_json:
         return jsonify({"error": "request must be json"}), 415
-    request_json = await request.get_json()
 
+    request_json = await request.get_json()
+    latest = request_json["messages"][-1]["content"]
+
+    # 1) Check for password‐expiry intent
+    pw = await handle_password_expiry(request.headers, latest)
+    if pw:
+        # immediate return, no OpenAI call
+        return jsonify({ "choices": [ pw ] })
+
+    # 2) Otherwise delegate to your existing chat flow
     return await conversation_internal(request_json, request.headers)
 
 
