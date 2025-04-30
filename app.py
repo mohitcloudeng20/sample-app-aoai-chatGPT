@@ -41,57 +41,85 @@ from backend.utils import (
 from azure.identity.aio import DefaultAzureCredential
 from msgraph.core import GraphClient
 
+# Your own auth helper
+from backend.auth import get_authenticated_user_details
+
 PASSWORD_EXPIRE_RE = re.compile(
     r"\bwhen\s+does\s+(?:my\s+password|the\s+password\s+for\s+user\s+(?P<target>\w+))\s+expire\??",
     re.IGNORECASE
 )
 
 def parse_password_expiry_intent(message_text: str):
-    m = PASSWORD_EXPIRE_RE.search(message_text)
-    if not m:
+    try:
+        m = PASSWORD_EXPIRE_RE.search(message_text)
+        if not m:
+            return None
+        return {"target": m.group("target") or "me"}
+    except Exception:
         return None
-    return {"target": m.group("target")}
 
 async def fetch_last_password_set_date(user_upn: str) -> datetime | None:
-    cred = DefaultAzureCredential()
-    client = GraphClient(credential=cred)
-    resp = await client.get(
-        f"/users/{user_upn}?$select=lastPasswordChangeDateTime"
-    )
-    data = resp.json()
-    iso = data.get("lastPasswordChangeDateTime")
-    return None if not iso else datetime.fromisoformat(iso.replace("Z", "+00:00"))
-
+    try:
+        cred = DefaultAzureCredential()
+        async with GraphClient(credential=cred) as client:
+            resp = await client.get(
+                f"/users/{user_upn}?$select=lastPasswordChangeDateTime"
+            )
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            iso = data.get("lastPasswordChangeDateTime")
+            return None if not iso else datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except Exception:
+        return None
+        
 PASSWORD_LIFETIME_DAYS = 180
 
-async def handle_password_expiry(request, message_text):
-    user = await get_authenticated_user_details(request)
-    intent = parse_password_expiry_intent(message_text)
-    if not intent:
-        return None
+async def handle_password_expiry(request_headers, message_text):
+    try:
+        # First check if this is a password expiry question
+        intent = parse_password_expiry_intent(message_text)
+        if not intent:
+            return None
 
-    target = intent["target"] or user["id"]
-    if target != user["id"] and "admin" not in user.get("roles", []):
+        # Get user details safely
+        user = await get_authenticated_user_details(request_headers)
+        if not user:
+            return {
+                "role": "assistant",
+                "content": "⚠️ You need to be authenticated to check password expiry."
+            }
+
+        target = intent["target"]
+        if target == "me":
+            target = user["id"]
+            
+        # Check permissions
+        if target != user["id"] and "admin" not in user.get("roles", []):
+            return {
+                "role": "assistant",
+                "content": "⚠️ You're not allowed to check other users' passwords. You can only see your expiry date."
+            }
+
+        # Fetch password info
+        last_set = await fetch_last_password_set_date(target)
+        if last_set is None:
+            return {
+                "role": "assistant",
+                "content": f"❓ I can't find any password record for **{target}**."
+            }
+
+        expiry = last_set + timedelta(days=PASSWORD_LIFETIME_DAYS)
         return {
             "role": "assistant",
-            "content": "⚠️ You’re not allowed to check other users’ passwords. You can only see *your* expiry date."
+            "content": (
+                f"🔒 Password for **{target}** was last set on "
+                f"{last_set.date()}, so it will expire on **{expiry.date()}**."
+            )
         }
-
-    last_set = await fetch_last_password_set_date(target)
-    if last_set is None:
-        return {
-            "role": "assistant",
-            "content": f"❓ I can’t find any password record for **{target}**."
-        }
-
-    expiry = last_set + timedelta(days=PASSWORD_LIFETIME_DAYS)
-    return {
-        "role": "assistant",
-        "content": (
-            f"🔒 Password for **{target}** was last set on "
-            f"{last_set.date()}, so it will expire on **{expiry.date()}**."
-        )
-    }
+    except Exception as e:
+        logging.exception("Error in password expiry check")
+        return None  # Return None to fall back to normal chat processing
 
 bp = Blueprint("routes", __name__, static_folder="static", template_folder="static")
 
@@ -541,21 +569,23 @@ async def conversation_internal(request_body, request_headers):
             return jsonify({"error": str(ex)}), 500
 
 
+# Then modify your /conversation endpoint like this:
 @bp.route("/conversation", methods=["POST"])
 async def conversation():
     if not request.is_json:
         return jsonify({"error": "request must be json"}), 415
 
     request_json = await request.get_json()
-    latest = request_json["messages"][-1]["content"]
+    latest_message = request_json["messages"][-1]
+    
+    # Only check for password expiry in user messages
+    if latest_message.get("role") == "user":
+        latest_content = latest_message.get("content", "")
+        pw_response = await handle_password_expiry(request.headers, latest_content)
+        if pw_response:
+            return jsonify({ "choices": [ { "messages": [pw_response] } ] })
 
-    # 1) Check for password‐expiry intent
-    pw = await handle_password_expiry(request, latest)
-    if pw:
-        # immediate return, no OpenAI call
-        return jsonify({ "choices": [ pw ] })
-
-    # 2) Otherwise delegate to your existing chat flow
+    # Normal chat flow
     return await conversation_internal(request_json, request.headers)
 
 
