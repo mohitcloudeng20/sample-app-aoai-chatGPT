@@ -41,9 +41,6 @@ from backend.utils import (
 from azure.identity.aio import DefaultAzureCredential
 from msgraph.core import GraphClient
 
-# Your own auth helper
-from backend.auth import get_authenticated_user_details
-
 PASSWORD_EXPIRE_RE = re.compile(
     r"\bwhen\s+does\s+(?:my\s+password|the\s+password\s+for\s+user\s+(?P<target>\w+))\s+expire\??",
     re.IGNORECASE
@@ -553,7 +550,7 @@ async def conversation():
     latest = request_json["messages"][-1]["content"]
 
     # 1) Check for password‐expiry intent
-    pw = await handle_password_expiry(request.headers, latest)
+    pw = await handle_password_expiry(request, latest)
     if pw:
         # immediate return, no OpenAI call
         return jsonify({ "choices": [ pw ] })
