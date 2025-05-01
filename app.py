@@ -15,8 +15,6 @@ from quart import (
     render_template,
     current_app,
 )
-import re
-from datetime import datetime, timedelta
 
 from openai import AsyncAzureOpenAI
 from azure.identity.aio import (
@@ -37,89 +35,6 @@ from backend.utils import (
     convert_to_pf_format,
     format_pf_non_streaming_response,
 )
-# Azure AD / MS Graph
-from azure.identity.aio import DefaultAzureCredential
-from msgraph.core import GraphClient
-
-# Your own auth helper
-from backend.auth import get_authenticated_user_details
-
-PASSWORD_EXPIRE_RE = re.compile(
-    r"\bwhen\s+does\s+(?:my\s+password|the\s+password\s+for\s+user\s+(?P<target>\w+))\s+expire\??",
-    re.IGNORECASE
-)
-
-def parse_password_expiry_intent(message_text: str):
-    try:
-        m = PASSWORD_EXPIRE_RE.search(message_text)
-        if not m:
-            return None
-        return {"target": m.group("target") or "me"}
-    except Exception:
-        return None
-
-async def fetch_last_password_set_date(user_upn: str) -> datetime | None:
-    try:
-        cred = DefaultAzureCredential()
-        async with GraphClient(credential=cred) as client:
-            resp = await client.get(
-                f"/users/{user_upn}?$select=lastPasswordChangeDateTime"
-            )
-            if resp.status_code != 200:
-                return None
-            data = resp.json()
-            iso = data.get("lastPasswordChangeDateTime")
-            return None if not iso else datetime.fromisoformat(iso.replace("Z", "+00:00"))
-    except Exception:
-        return None
-        
-PASSWORD_LIFETIME_DAYS = 180
-
-async def handle_password_expiry(request_headers, message_text):
-    try:
-        # First check if this is a password expiry question
-        intent = parse_password_expiry_intent(message_text)
-        if not intent:
-            return None
-
-        # Get user details safely
-        user = await get_authenticated_user_details(request_headers)
-        if not user:
-            return {
-                "role": "assistant",
-                "content": "⚠️ You need to be authenticated to check password expiry."
-            }
-
-        target = intent["target"]
-        if target == "me":
-            target = user["id"]
-            
-        # Check permissions
-        if target != user["id"] and "admin" not in user.get("roles", []):
-            return {
-                "role": "assistant",
-                "content": "⚠️ You're not allowed to check other users' passwords. You can only see your expiry date."
-            }
-
-        # Fetch password info
-        last_set = await fetch_last_password_set_date(target)
-        if last_set is None:
-            return {
-                "role": "assistant",
-                "content": f"❓ I can't find any password record for **{target}**."
-            }
-
-        expiry = last_set + timedelta(days=PASSWORD_LIFETIME_DAYS)
-        return {
-            "role": "assistant",
-            "content": (
-                f"🔒 Password for **{target}** was last set on "
-                f"{last_set.date()}, so it will expire on **{expiry.date()}**."
-            )
-        }
-    except Exception as e:
-        logging.exception("Error in password expiry check")
-        return None  # Return None to fall back to normal chat processing
 
 bp = Blueprint("routes", __name__, static_folder="static", template_folder="static")
 
@@ -135,12 +50,11 @@ def create_app():
     async def init():
         try:
             app.cosmos_conversation_client = await init_cosmosdb_client()
-            cosmos_db_ready.set()  # Signal that CosmosDB setup is complete
+            cosmos_db_ready.set()
         except Exception as e:
             logging.exception("Failed to initialize CosmosDB client")
             app.cosmos_conversation_client = None
-            # Set the event even if there's an error to prevent blocking
-            cosmos_db_ready.set()
+            raise e
     
     return app
 
@@ -168,8 +82,6 @@ async def assets(path):
 DEBUG = os.environ.get("DEBUG", "false")
 if DEBUG.lower() == "true":
     logging.basicConfig(level=logging.DEBUG)
-else:
-    logging.basicConfig(level=logging.INFO)  # Set a default log level
 
 USER_AGENT = "GitHubSampleWebApp/AsyncAzureOpenAI/1.0.0"
 
@@ -337,7 +249,8 @@ async def init_openai_client():
 
         return azure_openai_client
     except Exception as e:
-        logging.exception("Exception in Azure OpenAI initialization")
+        logging.exception("Exception in Azure OpenAI initialization", e)
+        azure_openai_client = None
         raise e
 
 
@@ -364,9 +277,9 @@ async def init_cosmosdb_client():
                 enable_message_feedback=app_settings.chat_history.enable_feedback,
             )
         except Exception as e:
-            logging.exception("Exception in CosmosDB initialization")
-            # Don't raise the exception, return None instead
+            logging.exception("Exception in CosmosDB initialization", e)
             cosmos_conversation_client = None
+            raise e
     else:
         logging.debug("CosmosDB not configured")
 
@@ -405,13 +318,10 @@ def prepare_model_args(request_body, request_headers):
 
     user_json = None
     if (MS_DEFENDER_ENABLED):
-        try:
-            authenticated_user_details = get_authenticated_user_details(request_headers)
-            conversation_id = request_body.get("conversation_id", None)
-            application_name = app_settings.ui.title
-            user_json = get_msdefender_user_json(authenticated_user_details, request_headers, conversation_id, application_name)
-        except Exception as e:
-            logging.warning(f"Failed to get MS Defender user JSON: {str(e)}")
+        authenticated_user_details = get_authenticated_user_details(request_headers)
+        conversation_id = request_body.get("conversation_id", None)
+        application_name = app_settings.ui.title
+        user_json = get_msdefender_user_json(authenticated_user_details, request_headers, conversation_id, application_name)
 
     model_args = {
         "messages": messages,
@@ -421,22 +331,17 @@ def prepare_model_args(request_body, request_headers):
         "stop": app_settings.azure_openai.stop_sequence,
         "stream": app_settings.azure_openai.stream,
         "model": app_settings.azure_openai.model,
+        "user": user_json
     }
-    
-    if user_json:
-        model_args["user"] = user_json
 
     if app_settings.datasource:
-        try:
-            model_args["extra_body"] = {
-                "data_sources": [
-                    app_settings.datasource.construct_payload_configuration(
-                        request=request
-                    )
-                ]
-            }
-        except Exception as e:
-            logging.exception("Failed to configure data sources")
+        model_args["extra_body"] = {
+            "data_sources": [
+                app_settings.datasource.construct_payload_configuration(
+                    request=request
+                )
+            ]
+        }
 
     model_args_clean = copy.deepcopy(model_args)
     if model_args_clean.get("extra_body"):
@@ -508,7 +413,6 @@ async def promptflow_request(request):
         return resp
     except Exception as e:
         logging.error(f"An error occurred while making promptflow_request: {e}")
-        raise e
 
 
 async def send_chat_request(request_body, request_headers):
@@ -535,22 +439,14 @@ async def send_chat_request(request_body, request_headers):
 
 async def complete_chat_request(request_body, request_headers):
     if app_settings.base_settings.use_promptflow:
-        try:
-            response = await promptflow_request(request_body)
-            history_metadata = request_body.get("history_metadata", {})
-            return format_pf_non_streaming_response(
-                response,
-                history_metadata,
-                app_settings.promptflow.response_field_name,
-                app_settings.promptflow.citations_field_name
-            )
-        except Exception as e:
-            logging.exception("Error in promptflow request")
-            # Fall back to regular OpenAI request
-            logging.info("Falling back to regular OpenAI request")
-            response, apim_request_id = await send_chat_request(request_body, request_headers)
-            history_metadata = request_body.get("history_metadata", {})
-            return format_non_streaming_response(response, history_metadata, apim_request_id)
+        response = await promptflow_request(request_body)
+        history_metadata = request_body.get("history_metadata", {})
+        return format_pf_non_streaming_response(
+            response,
+            history_metadata,
+            app_settings.promptflow.response_field_name,
+            app_settings.promptflow.citations_field_name
+        )
     else:
         response, apim_request_id = await send_chat_request(request_body, request_headers)
         history_metadata = request_body.get("history_metadata", {})
@@ -588,28 +484,13 @@ async def conversation_internal(request_body, request_headers):
             return jsonify({"error": str(ex)}), 500
 
 
-# Then modify your /conversation endpoint like this:
 @bp.route("/conversation", methods=["POST"])
 async def conversation():
     if not request.is_json:
         return jsonify({"error": "request must be json"}), 415
+    request_json = await request.get_json()
 
-    try:
-        request_json = await request.get_json()
-        latest_message = request_json["messages"][-1]
-        
-        # Only check for password expiry in user messages
-        if latest_message.get("role") == "user":
-            latest_content = latest_message.get("content", "")
-            pw_response = await handle_password_expiry(request.headers, latest_content)
-            if pw_response:
-                return jsonify({ "choices": [ { "messages": [pw_response] } ] })
-
-        # Normal chat flow
-        return await conversation_internal(request_json, request.headers)
-    except Exception as e:
-        logging.exception("Exception in /conversation")
-        return jsonify({"error": str(e)}), 500
+    return await conversation_internal(request_json, request.headers)
 
 
 @bp.route("/frontend_settings", methods=["GET"])
@@ -624,32 +505,18 @@ def get_frontend_settings():
 ## Conversation History API ##
 @bp.route("/history/generate", methods=["POST"])
 async def add_conversation():
+    await cosmos_db_ready.wait()
+    authenticated_user = get_authenticated_user_details(request_headers=request.headers)
+    user_id = authenticated_user["user_principal_id"]
+
+    ## check request for conversation_id
+    request_json = await request.get_json()
+    conversation_id = request_json.get("conversation_id", None)
+
     try:
-        # Wait for CosmosDB to be ready, but with a timeout
-        try:
-            await asyncio.wait_for(cosmos_db_ready.wait(), timeout=5.0)
-        except asyncio.TimeoutError:
-            logging.warning("Timed out waiting for CosmosDB to be ready")
-            return jsonify({"error": "CosmosDB initialization timed out"}), 500
-            
-        authenticated_user = get_authenticated_user_details(request_headers=request.headers)
-        if not authenticated_user:
-            return jsonify({"error": "Authentication required"}), 401
-            
-        user_id = authenticated_user.get("user_principal_id")
-        if not user_id:
-            return jsonify({"error": "Invalid user details"}), 400
-
-        ## check request for conversation_id
-        request_json = await request.get_json()
-        conversation_id = request_json.get("conversation_id", None)
-
         # make sure cosmos is configured
         if not current_app.cosmos_conversation_client:
-            # Fallback to just conversation if CosmosDB is not configured
-            logging.warning("CosmosDB is not configured - falling back to conversation only")
-            request_body = await request.get_json()
-            return await conversation_internal(request_body, request.headers)
+            raise Exception("CosmosDB is not configured or not working")
 
         # check for the conversation_id, if the conversation is not set, we will create a new one
         history_metadata = {}
@@ -689,44 +556,27 @@ async def add_conversation():
 
     except Exception as e:
         logging.exception("Exception in /history/generate")
-        # Try to continue with a simple conversation without history
-        try:
-            request_body = await request.get_json()
-            return await conversation_internal(request_body, request.headers)
-        except Exception as inner_e:
-            logging.exception("Exception in fallback conversation")
-            return jsonify({"error": str(e)}), 500
+        return jsonify({"error": str(e)}), 500
 
 
 @bp.route("/history/update", methods=["POST"])
 async def update_conversation():
+    await cosmos_db_ready.wait()
+    authenticated_user = get_authenticated_user_details(request_headers=request.headers)
+    user_id = authenticated_user["user_principal_id"]
+
+    ## check request for conversation_id
+    request_json = await request.get_json()
+    conversation_id = request_json.get("conversation_id", None)
+
     try:
-        # Wait for CosmosDB to be ready, but with a timeout
-        try:
-            await asyncio.wait_for(cosmos_db_ready.wait(), timeout=5.0)
-        except asyncio.TimeoutError:
-            logging.warning("Timed out waiting for CosmosDB to be ready")
-            return jsonify({"success": True}), 200  # Pretend it succeeded
-            
-        authenticated_user = get_authenticated_user_details(request_headers=request.headers)
-        if not authenticated_user:
-            return jsonify({"error": "Authentication required"}), 401
-            
-        user_id = authenticated_user.get("user_principal_id")
-        if not user_id:
-            return jsonify({"error": "Invalid user details"}), 400
-
-        ## check request for conversation_id
-        request_json = await request.get_json()
-        conversation_id = request_json.get("conversation_id", None)
-
         # make sure cosmos is configured
         if not current_app.cosmos_conversation_client:
-            return jsonify({"success": True}), 200  # Pretend it succeeded
+            raise Exception("CosmosDB is not configured or not working")
 
         # check for the conversation_id, if the conversation is not set, we will create a new one
         if not conversation_id:
-            return jsonify({"error": "No conversation_id found"}), 400
+            raise Exception("No conversation_id found")
 
         ## Format the incoming message object in the "chat/completions" messages format
         ## then write it to the conversation history in cosmos
@@ -748,15 +598,15 @@ async def update_conversation():
                 input_message=messages[-1],
             )
         else:
-            return jsonify({"error": "No bot messages found"}), 400
+            raise Exception("No bot messages found")
 
         # Submit request to Chat Completions for response
         response = {"success": True}
         return jsonify(response), 200
+
     except Exception as e:
         logging.exception("Exception in /history/update")
-        # Return success anyway as this is a non-critical operation
-        return jsonify({"success": True}), 200
+        return jsonify({"error": str(e)}), 500
 
 
 @bp.route("/history/message_feedback", methods=["POST"])
