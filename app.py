@@ -16,8 +16,6 @@ from quart import (
     current_app,
 )
 
-from google.auth import jwt
-
 from openai import AsyncAzureOpenAI
 from azure.identity.aio import (
     DefaultAzureCredential,
@@ -37,30 +35,6 @@ from backend.utils import (
     convert_to_pf_format,
     format_pf_non_streaming_response,
 )
-
-# Constants for Google Chat verification
-GOOGLE_CHAT_CERTS_URL = "https://www.googleapis.com/service_accounts/v1/metadata/x509/chat@system.gserviceaccount.com"
-# You can also pull this from an environment variable
-GOOGLE_CHAT_CLIENT_ID = os.environ.get(
-    "GOOGLE_CHAT_CLIENT_ID",
-    "185257238474-vqo558j115fpunbi2kooqc8nv675q2rv.apps.googleusercontent.com"
-)
-
-def verify_google_chat_request(request):
-    auth_header = request.headers.get("Authorization")
-    if not auth_header:
-        logging.warning("No Authorization header in Google Chat request")
-        return False
-
-    token = auth_header.split("Bearer ")[-1]
-    try:
-        info = jwt.decode(token, certs_url=GOOGLE_CHAT_CERTS_URL)
-        # Optionally check the client ID too:
-        # return info.get("aud") == GOOGLE_CHAT_CLIENT_ID
-        return info.get("iss") == "chat@system.gserviceaccount.com"
-    except Exception as e:
-        logging.error(f"Failed to verify Google Chat request: {e}")
-        return False
 
 bp = Blueprint("routes", __name__, static_folder="static", template_folder="static")
 
@@ -138,9 +112,6 @@ MS_DEFENDER_ENABLED = os.environ.get("MS_DEFENDER_ENABLED", "true").lower() == "
 
 @bp.route("/webhook", methods=["POST"])
 async def google_chat_webhook():
-    if not verify_google_chat_request(request):
-        return jsonify({"error": "Unauthorized"}), 401
-        
     try:
         request_json = await request.get_json()
         event_type = request_json.get("type")
