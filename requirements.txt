@@ -20,3 +20,4 @@ azure-identity>=1.0.0
 msgraph-core>=0.3.0
 msal==1.24.0
 httpx==0.24.1
+azure-identity
