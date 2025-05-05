@@ -35,7 +35,6 @@ from backend.utils import (
     convert_to_pf_format,
     format_pf_non_streaming_response,
 )
-from .graph_api_utils import fetch_user_graph_data
 
 bp = Blueprint("routes", __name__, static_folder="static", template_folder="static")
 
@@ -110,23 +109,6 @@ frontend_settings = {
 
 # Enable Microsoft Defender for Cloud Integration
 MS_DEFENDER_ENABLED = os.environ.get("MS_DEFENDER_ENABLED", "true").lower() == "true"
-
-@bp.route("/user/status", methods=["GET"])
-async def get_user_status():
-    try:
-        user = get_authenticated_user_details(request.headers)
-        user_id = user.get("user_principal_name")
-
-        if not user_id:
-            return jsonify({"error": "User ID not found"}), 400
-
-        user_info = await fetch_user_graph_data(user_id)
-        return jsonify(user_info), 200
-
-    except Exception as e:
-        import logging
-        logging.exception("Failed to fetch user status")
-        return jsonify({"error": str(e)}), 500
 
 @bp.route("/webhook", methods=["POST"])
 async def google_chat_webhook():
@@ -271,52 +253,6 @@ async def init_openai_client():
         azure_openai_client = None
         raise e
 
-# after your Azure OpenAI client setup:
-msal_app = ConfidentialClientApplication(
-    client_id=os.environ["AZURE_CLIENT_ID"],
-    client_credential=os.environ["AZURE_CLIENT_SECRET"],
-    authority=f"https://login.microsoftonline.com/{os.environ['AZURE_TENANT_ID']}"
-)
-
-async def acquire_graph_token():
-    result = msal_app.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
-    return result.get("access_token")
-
-async def get_user_groups(token: str):
-    headers = {"Authorization": f"Bearer {token}"}
-    async with httpx.AsyncClient() as client:
-        r = await client.get("https://graph.microsoft.com/v1.0/me/memberOf", headers=headers)
-        data = r.json().get("value", [])
-    return [g["displayName"] for g in data if "displayName" in g]
-
-async def get_password_expiry(token: str):
-    headers = {"Authorization": f"Bearer {token}"}
-    async with httpx.AsyncClient() as client:
-        r = await client.get("https://graph.microsoft.com/beta/me", headers=headers)
-        profile = r.json().get("passwordProfile", {})
-    last = profile.get("lastPasswordChangeDateTime")
-    if not last:
-        return None, None
-    dt = datetime.datetime.fromisoformat(last.rstrip("Z"))
-    expiry = dt + datetime.timedelta(days=int(os.getenv("PASSWORD_EXPIRY_DAYS", 90)))
-    return dt, expiry
-
-@bp.route("/aad/groups", methods=["GET"])
-async def aad_groups():
-    token = await acquire_graph_token()
-    groups = await get_user_groups(token) or []
-    return jsonify({"groups": groups})
-
-@bp.route("/aad/password-expiry", methods=["GET"])
-async def aad_password_expiry():
-    token = await acquire_graph_token()
-    last, exp = await get_password_expiry(token)
-    if not last:
-        return jsonify({"error": "No password change info"}), 404
-    return jsonify({
-        "lastPasswordChange": last.isoformat(),
-        "expiryDate": exp.isoformat()
-    })
 
 async def init_cosmosdb_client():
     cosmos_conversation_client = None
