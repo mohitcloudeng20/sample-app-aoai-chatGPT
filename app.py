@@ -35,6 +35,7 @@ from backend.utils import (
     convert_to_pf_format,
     format_pf_non_streaming_response,
 )
+from .graph_api_utils import fetch_user_graph_data
 
 bp = Blueprint("routes", __name__, static_folder="static", template_folder="static")
 
@@ -109,6 +110,23 @@ frontend_settings = {
 
 # Enable Microsoft Defender for Cloud Integration
 MS_DEFENDER_ENABLED = os.environ.get("MS_DEFENDER_ENABLED", "true").lower() == "true"
+
+@bp.route("/user/status", methods=["GET"])
+async def get_user_status():
+    try:
+        user = get_authenticated_user_details(request.headers)
+        user_id = user.get("user_principal_name")
+
+        if not user_id:
+            return jsonify({"error": "User ID not found"}), 400
+
+        user_info = await fetch_user_graph_data(user_id)
+        return jsonify(user_info), 200
+
+    except Exception as e:
+        import logging
+        logging.exception("Failed to fetch user status")
+        return jsonify({"error": str(e)}), 500
 
 @bp.route("/webhook", methods=["POST"])
 async def google_chat_webhook():
