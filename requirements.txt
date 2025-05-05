@@ -18,3 +18,6 @@ cryptography>=41.0.0
 requests>=2.31.0
 azure-identity>=1.0.0
 msgraph-core>=0.3.0
+msal
+httpx
+python-dotenv
