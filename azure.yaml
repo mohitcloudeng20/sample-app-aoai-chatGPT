@@ -43,9 +43,3 @@ hooks:
         run: ./scripts/auth_update.sh;./scripts/prepdocs.sh;
         interactive: true
         continueOnError: false
-- name: AZURE_CLIENT_ID
-  value: "$(AZURE_CLIENT_ID)"
-- name: AZURE_TENANT_ID
-  value: "$(AZURE_TENANT_ID)"
-- name: AZURE_CLIENT_SECRET
-  value: "$(AZURE_CLIENT_SECRET)"
