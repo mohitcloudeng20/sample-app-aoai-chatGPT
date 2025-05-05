@@ -273,9 +273,9 @@ async def init_openai_client():
 
 # after your Azure OpenAI client setup:
 msal_app = ConfidentialClientApplication(
-    client_id=os.environ["AZURE_AD_CLIENT_ID"],
-    client_credential=os.environ["AZURE_AD_CLIENT_SECRET"],
-    authority=f"https://login.microsoftonline.com/{os.environ['AZURE_AD_TENANT_ID']}"
+    client_id=os.environ["AZURE_CLIENT_ID"],
+    client_credential=os.environ["AZURE_CLIENT_SECRET"],
+    authority=f"https://login.microsoftonline.com/{os.environ['AZURE_TENANT_ID']}"
 )
 
 async def acquire_graph_token():
