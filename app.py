@@ -15,10 +15,6 @@ from quart import (
     render_template,
     current_app,
 )
-from google.auth import jwt
-from google.oauth2 import id_token
-from google.auth.transport import requests as google_requests
-
 
 from openai import AsyncAzureOpenAI
 from azure.identity.aio import (
@@ -44,27 +40,6 @@ bp = Blueprint("routes", __name__, static_folder="static", template_folder="stat
 
 cosmos_db_ready = asyncio.Event()
 
-# Your Google Chat bot project ID (audience claim)
-GOOGLE_CHAT_BOT_PROJECT_ID = "it-bot-integration"
-
-async def verify_google_request(auth_header: str):
-    if not auth_header or not auth_header.startswith("Bearer "):
-        raise Exception("Missing or invalid Authorization header")
-
-    token = auth_header.split(" ")[1]
-    request_adapter = google_requests.Request()
-
-    # This function automatically:
-    # - fetches Google certs
-    # - verifies signature
-    # - validates expiry, issuer, audience
-    decoded_token = id_token.verify_oauth2_token(
-        token,
-        request_adapter,
-        GOOGLE_CHAT_BOT_PROJECT_ID  # <-- Required audience validation
-    )
-
-    return decoded_token  # Contains email, sub, etc.
 
 def create_app():
     app = Quart(__name__)
@@ -138,17 +113,15 @@ MS_DEFENDER_ENABLED = os.environ.get("MS_DEFENDER_ENABLED", "true").lower() == "
 @bp.route("/webhook", methods=["POST"])
 async def google_chat_webhook():
     try:
-        auth_header = request.headers.get("Authorization")
-        token_data = await verify_google_request(auth_header)
-
-        user_email = token_data.get("email", "unknown@contoso.com")
-
         request_json = await request.get_json()
         event_type = request_json.get("type")
 
         if event_type == "MESSAGE":
+            # Extract user message and sender details
             user_message = request_json.get("message", {}).get("text", "")
+            user_name = request_json.get("message", {}).get("sender", {}).get("displayName", "User")
 
+            # Prepare model arguments similar to /conversation
             model_args = {
                 "messages": [
                     {"role": "system", "content": app_settings.azure_openai.system_message},
@@ -159,9 +132,9 @@ async def google_chat_webhook():
                 "temperature": app_settings.azure_openai.temperature,
                 "top_p": app_settings.azure_openai.top_p,
                 "stop": app_settings.azure_openai.stop_sequence,
-                "user": user_email
             }
 
+            # Include data sources if configured
             if app_settings.datasource:
                 model_args["extra_body"] = {
                     "data_sources": [
@@ -169,26 +142,33 @@ async def google_chat_webhook():
                     ]
                 }
 
+            # Call Azure OpenAI with prepared arguments
             azure_openai_client = await init_openai_client()
             response = await azure_openai_client.chat.completions.create(**model_args)
             response_text = response.choices[0].message.content.strip()
 
-            return jsonify({"text": response_text})
+            return jsonify({
+                "text": response_text
+            })
 
         elif event_type == "ADDED_TO_SPACE":
-            space_name = request_json.get("space", {}).get("name", "a space")
-            return jsonify({"text": f"Thanks for adding me to {space_name}!"})
+            space_name = request_json.get("space", {}).get("name", "unknown space")
+            return jsonify({
+                "text": f"Thanks for adding me to {space_name}!"
+            })
 
         elif event_type == "REMOVED_FROM_SPACE":
             return jsonify({})
 
         else:
-            return jsonify({"text": "Event type not recognized."})
+            return jsonify({
+                "text": "I didn't understand that event type."
+            })
 
     except Exception as e:
-        import logging
-        logging.exception("Error verifying or processing request")
-        return jsonify({"error": str(e)}), 401
+        logging.exception("Error handling Google Chat webhook")
+        return jsonify({"error": str(e)}), 500
+
 
 async def handle_google_chat_message(user_message, user_name):
     """
