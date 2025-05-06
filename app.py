@@ -1,3 +1,4 @@
+import aiohttp
 import copy
 import json
 import os
@@ -15,6 +16,9 @@ from quart import (
     render_template,
     current_app,
 )
+
+from jose import jwt
+from backend.auth.auth_utils import get_user_roles_from_token
 
 from openai import AsyncAzureOpenAI
 from azure.identity.aio import (
@@ -35,6 +39,35 @@ from backend.utils import (
     convert_to_pf_format,
     format_pf_non_streaming_response,
 )
+
+TENANT_ID = "d2e7c801-ebde-478a-8094-73a9bce9a69c"  # Replace with your real tenant ID
+CLIENT_ID = "e32115d3-fda1-424d-b36a-935cb75f09af"  # Replace with your app registration client ID
+JWK_URL = f"https://login.microsoftonline.com/{TENANT_ID}/discovery/v2.0/keys"
+ALGORITHM = "RS256"
+
+async def get_user_roles_from_token(auth_header: str):
+    if not auth_header or not auth_header.startswith("Bearer "):
+        return []
+
+    token = auth_header.split("Bearer ")[-1]
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(JWK_URL) as resp:
+            jwks = await resp.json()
+            unverified_header = jwt.get_unverified_header(token)
+            key = next((k for k in jwks["keys"] if k["kid"] == unverified_header["kid"]), None)
+            if not key:
+                return []
+
+            public_key = jwt.construct_rsa_public_key(key)
+            payload = jwt.decode(
+                token,
+                public_key,
+                algorithms=[ALGORITHM],
+                audience=CLIENT_ID,
+                issuer=f"https://login.microsoftonline.com/{TENANT_ID}/v2.0"
+            )
+            return payload.get("roles", [])
 
 bp = Blueprint("routes", __name__, static_folder="static", template_folder="static")
 
@@ -463,9 +496,27 @@ async def stream_chat_request(request_body, request_headers):
 
     return generate()
 
-
 async def conversation_internal(request_body, request_headers):
     try:
+        auth_header = request_headers.get("Authorization")
+        roles = await get_user_roles_from_token(auth_header)
+
+        # Set a system prompt based on role
+        if "Admin" in roles:
+            role_specific_system_prompt = "You are interacting with an Admin. Allow execution of admin tasks with validation."
+        elif "User" in roles:
+            role_specific_system_prompt = "You are interacting with a standard user. Only provide user’s own profile info and no admin functionality."
+        else:
+            return jsonify({"error": "Unauthorized: No valid role assigned."}), 403
+
+        # Inject custom system message before processing the request
+        if "messages" in request_body and isinstance(request_body["messages"], list):
+            request_body["messages"].insert(0, {
+                "role": "system",
+                "content": role_specific_system_prompt
+            })
+
+        # Proceed with existing logic
         if app_settings.azure_openai.stream and not app_settings.base_settings.use_promptflow:
             result = await stream_chat_request(request_body, request_headers)
             response = await make_response(format_as_ndjson(result))
@@ -482,8 +533,7 @@ async def conversation_internal(request_body, request_headers):
             return jsonify({"error": str(ex)}), ex.status_code
         else:
             return jsonify({"error": str(ex)}), 500
-
-
+			
 @bp.route("/conversation", methods=["POST"])
 async def conversation():
     if not request.is_json:
