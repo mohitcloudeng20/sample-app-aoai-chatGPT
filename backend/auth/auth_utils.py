@@ -1,3 +1,35 @@
+from jose import jwt
+import aiohttp
+
+TENANT_ID = "d2e7c801-ebde-478a-8094-73a9bce9a69c"  # Replace with your real tenant ID
+CLIENT_ID = "e32115d3-fda1-424d-b36a-935cb75f09af"  # Replace with your app registration client ID
+JWK_URL = f"https://login.microsoftonline.com/{TENANT_ID}/discovery/v2.0/keys"
+ALGORITHM = "RS256"
+
+async def get_user_roles_from_token(auth_header: str):
+    if not auth_header or not auth_header.startswith("Bearer "):
+        return []
+
+    token = auth_header.split("Bearer ")[-1]
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(JWK_URL) as resp:
+            jwks = await resp.json()
+            unverified_header = jwt.get_unverified_header(token)
+            key = next((k for k in jwks["keys"] if k["kid"] == unverified_header["kid"]), None)
+            if not key:
+                return []
+
+            public_key = jwt.construct_rsa_public_key(key)
+            payload = jwt.decode(
+                token,
+                public_key,
+                algorithms=[ALGORITHM],
+                audience=CLIENT_ID,
+                issuer=f"https://login.microsoftonline.com/{TENANT_ID}/v2.0"
+            )
+            return payload.get("roles", [])
+
 def get_authenticated_user_details(request_headers):
     user_object = {}
 
