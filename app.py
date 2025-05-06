@@ -16,13 +16,6 @@ from quart import (
     current_app,
 )
 
-from fastapi import FastAPI, Depends, HTTPException, Request
-from fastapi.security import OAuth2AuthorizationCodeBearer
-from jose import jwt
-from jose.exceptions import JWTError
-from typing import List
-import aiohttp
-
 from openai import AsyncAzureOpenAI
 from azure.identity.aio import (
     DefaultAzureCredential,
@@ -44,66 +37,6 @@ from backend.utils import (
 )
 
 bp = Blueprint("routes", __name__, static_folder="static", template_folder="static")
-
-app = FastAPI()
-
-# === Azure AD Configuration ===
-TENANT_ID = "d2e7c801-ebde-478a-8094-73a9bce9a69c"
-CLIENT_ID = "e32115d3-fda1-424d-b36a-935cb75f09af"  # App Registration ID
-JWK_URL = f"https://login.microsoftonline.com/{TENANT_ID}/discovery/v2.0/keys"
-ALGORITHM = "RS256"
-
-oauth2_scheme = OAuth2AuthorizationCodeBearer(
-    authorizationUrl=f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/authorize",
-    tokenUrl=f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
-)
-
-# === Fetch Azure public keys ===
-async def get_public_keys():
-    async with aiohttp.ClientSession() as session:
-        async with session.get(JWK_URL) as resp:
-            return await resp.json()
-
-# === Decode and verify JWT ===
-async def get_roles_from_token(token: str = Depends(oauth2_scheme)) -> List[str]:
-    try:
-        jwks = await get_public_keys()
-        unverified_header = jwt.get_unverified_header(token)
-
-        key = next((k for k in jwks["keys"] if k["kid"] == unverified_header["kid"]), None)
-        if key is None:
-            raise HTTPException(status_code=403, detail="Invalid token key")
-
-        public_key = jwt.construct_rsa_public_key(key)
-
-        payload = jwt.decode(
-            token,
-            public_key,
-            algorithms=[ALGORITHM],
-            audience=CLIENT_ID,
-            issuer=f"https://login.microsoftonline.com/{TENANT_ID}/v2.0"
-        )
-
-        roles = payload.get("roles", [])
-        return roles
-
-    except JWTError as e:
-        raise HTTPException(status_code=403, detail=f"Token validation error: {str(e)}")
-
-# === Bot Endpoint ===
-@app.post("/chat")
-async def chat_with_bot(request: Request, roles: List[str] = Depends(get_roles_from_token)):
-    body = await request.json()
-    user_input = body.get("message", "")
-
-    if "Admin" in roles:
-        response = f"[ADMIN MODE ENABLED] You said: '{user_input}'. Bot will now allow admin commands."
-    elif "User" in roles:
-        response = f"[USER MODE] You said: '{user_input}'. Only user-level info will be shown."
-    else:
-        raise HTTPException(status_code=403, detail="Unauthorized: No valid role assigned.")
-
-    return {"reply": response}
 
 cosmos_db_ready = asyncio.Event()
 
