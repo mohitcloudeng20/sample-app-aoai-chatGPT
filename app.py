@@ -469,7 +469,7 @@ async def stream_chat_request(request_body, request_headers):
 async def conversation_internal(request_body, request_headers):
     try:
         auth_header = request_headers.get("Authorization")
-        roles = await get_user_roles_from_token(auth_header)
+        roles = get_user_roles_from_token(request_headers)
 
         # Set a system prompt based on role
         if "Admin" in roles:
