@@ -6,29 +6,22 @@ CLIENT_ID = "e32115d3-fda1-424d-b36a-935cb75f09af"  # Replace with your app regi
 JWK_URL = f"https://login.microsoftonline.com/{TENANT_ID}/discovery/v2.0/keys"
 ALGORITHM = "RS256"
 
-async def get_user_roles_from_token(auth_header: str):
-    if not auth_header or not auth_header.startswith("Bearer "):
+def get_user_roles_from_token(headers: dict):
+    """
+    Extract roles from the ID token passed via EasyAuth header.
+    """
+    id_token = headers.get("X-Ms-Token-Aad-Id-Token")
+    if not id_token:
+        logging.warning("Missing X-Ms-Token-Aad-Id-Token header")
         return []
 
-    token = auth_header.split("Bearer ")[-1]
-
-    async with aiohttp.ClientSession() as session:
-        async with session.get(JWK_URL) as resp:
-            jwks = await resp.json()
-            unverified_header = jwt.get_unverified_header(token)
-            key = next((k for k in jwks["keys"] if k["kid"] == unverified_header["kid"]), None)
-            if not key:
-                return []
-
-            public_key = jwt.construct_rsa_public_key(key)
-            payload = jwt.decode(
-                token,
-                public_key,
-                algorithms=[ALGORITHM],
-                audience=CLIENT_ID,
-                issuer=f"https://login.microsoftonline.com/{TENANT_ID}/v2.0"
-            )
-            return payload.get("roles", [])
+    try:
+        # Parse the token without verifying the signature (since it's already trusted in EasyAuth context)
+        claims = jwt.get_unverified_claims(id_token)
+        return claims.get("roles", [])
+    except Exception as e:
+        logging.exception("Failed to extract roles from ID token")
+        return []
 
 def get_authenticated_user_details(request_headers):
     user_object = {}
