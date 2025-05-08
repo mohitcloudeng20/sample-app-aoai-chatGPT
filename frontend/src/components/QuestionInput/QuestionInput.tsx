@@ -107,22 +107,43 @@ export const QuestionInput = ({ onSend, disabled, placeholder, clearOnSend, conv
         onKeyDown={onEnterPress}
       />
       {!OYD_ENABLED && (
-        <div className={styles.fileInputContainer}>
-          <input
-            type="file"
-            id="fileInput"
-            onChange={(event) => handleImageUpload(event)}
-            accept="image/*"
-            className={styles.fileInput}
-          />
-          <label htmlFor="fileInput" className={styles.fileLabel} aria-label='Upload Image'>
-            <FontIcon
-              className={styles.fileIcon}
-              iconName={'PhotoCollection'}
-              aria-label='Upload Image'
-            />
-          </label>
-        </div>)}
+  <div className={styles.fileInputContainer}>
+    <input
+      type="file"
+      id="fileInput"
+      onChange={(event) => handleImageUpload(event)}
+      accept="image/*"
+      className={styles.fileInput}
+    />
+    <label htmlFor="fileInput" className={styles.fileLabel} aria-label='Upload Image'>
+      <FontIcon
+        className={styles.fileIcon}
+        iconName={'PhotoCollection'}
+        aria-label='Upload Image'
+      />
+    </label>
+
+    {/* 📎 Attachment button */}
+    <input
+      type="file"
+      id="attachmentInput"
+      className={styles.fileInput}
+      onChange={(event) => {
+        const file = event.target.files?.[0];
+        if (file) {
+          console.log("📎 Attachment selected:", file.name);
+        }
+      }}
+    />
+    <label htmlFor="attachmentInput" className={styles.attachmentLabel} aria-label='Upload Attachment'>
+      <FontIcon
+        className={styles.attachmentIcon}
+        iconName="Attach"
+        aria-label="Upload Attachment"
+      />
+    </label>
+  </div>
+)}
       {base64Image && <img className={styles.uploadedImage} src={base64Image} alt="Uploaded Preview" />}
       <div
         className={styles.questionInputSendButtonContainer}
