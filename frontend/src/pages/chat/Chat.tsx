@@ -931,20 +931,33 @@ const Chat = () => {
                   dialogContentProps={errorDialogContentProps}
                   modalProps={modalProps}></Dialog>
               </Stack>
-              <QuestionInput
-                clearOnSend
-                placeholder="Type a new question..."
-                disabled={isLoading}
-                onSend={(question, id) => {
-                  appStateContext?.state.isCosmosDBAvailable?.cosmosDB
-                    ? makeApiRequestWithCosmosDB(question, id)
-                    : makeApiRequestWithoutCosmosDB(question, id)
-                }}
-                conversationId={
-                  appStateContext?.state.currentChat?.id ? appStateContext?.state.currentChat?.id : undefined
-                }
-              />
-            </Stack>
+             <div className={styles.chatInputRow}>
+  <label htmlFor="file-input" className={styles.attachmentButton}>📎</label>
+  <input
+    type="file"
+    id="file-input"
+    style={{ display: 'none' }}
+    onChange={(e) => {
+      if (e.target.files?.length > 0) {
+        console.log('Selected file:', e.target.files[0].name);
+      }
+    }}
+  />
+  <QuestionInput
+    clearOnSend
+    placeholder="Type a new question..."
+    disabled={isLoading}
+    onSend={(question, id) => {
+      appStateContext?.state.isCosmosDBAvailable?.cosmosDB
+        ? makeApiRequestWithCosmosDB(question, id)
+        : makeApiRequestWithoutCosmosDB(question, id)
+    }}
+    conversationId={
+      appStateContext?.state.currentChat?.id ? appStateContext?.state.currentChat?.id : undefined
+    }
+  />
+    </div>
+ </Stack>
           </div>
           {/* Citation Panel */}
           {messages && messages.length > 0 && isCitationPanelOpen && activeCitation && (
