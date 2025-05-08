@@ -469,24 +469,25 @@ async def stream_chat_request(request_body, request_headers):
 async def conversation_internal(request_body, request_headers):
     try:
         auth_header = request_headers.get("Authorization")
-        roles = get_user_roles_from_token(request_headers)
-
+        roles = await get_user_roles_from_token(auth_header)
+        
         # Set a system prompt based on role
         if "Admin" in roles:
             role_specific_system_prompt = "You are interacting with an Admin. Allow execution of admin tasks with validation."
         elif "User" in roles:
-            role_specific_system_prompt = "You are interacting with a standard user. Only provide user’s own profile info and no admin functionality."
+            role_specific_system_prompt = "You are interacting with a standard user. Only provide user's own profile info and no admin functionality."
         else:
             return jsonify({"error": "Unauthorized: No valid role assigned."}), 403
-
+            
         # Inject custom system message before processing the request
         if "messages" in request_body and isinstance(request_body["messages"], list):
+            # Insert at the beginning to override any existing system messages
             request_body["messages"].insert(0, {
                 "role": "system",
                 "content": role_specific_system_prompt
             })
-
-        # Proceed with existing logic
+            
+        # Continue with existing chat processing logic
         if app_settings.azure_openai.stream and not app_settings.base_settings.use_promptflow:
             result = await stream_chat_request(request_body, request_headers)
             response = await make_response(format_as_ndjson(result))
@@ -496,13 +497,40 @@ async def conversation_internal(request_body, request_headers):
         else:
             result = await complete_chat_request(request_body, request_headers)
             return jsonify(result)
-
+            
     except Exception as ex:
         logging.exception(ex)
         if hasattr(ex, "status_code"):
             return jsonify({"error": str(ex)}), ex.status_code
         else:
             return jsonify({"error": str(ex)}), 500
+
+@bp.route("/admin/users", methods=["GET"])
+@require_admin  # Only admins can access this endpoint
+async def list_users():
+    try:
+        # Admin-only functionality to list users
+        # Implementation depends on how you store/access user data
+        return jsonify({"message": "Admin access granted", "users": ["user1", "user2"]}), 200
+    except Exception as e:
+        logging.exception("Error in admin endpoint")
+        return jsonify({"error": str(e)}), 500
+
+@bp.route("/user/profile", methods=["GET"])
+@require_user  # Any authenticated user (including admins) can access
+async def get_user_profile():
+    try:
+        authenticated_user = get_authenticated_user_details(request_headers=request.headers)
+        return jsonify({
+            "message": "User profile access granted",
+            "profile": {
+                "user_id": authenticated_user["user_principal_id"],
+                "user_name": authenticated_user["user_name"]
+            }
+        }), 200
+    except Exception as e:
+        logging.exception("Error in user endpoint")
+        return jsonify({"error": str(e)}), 500
 			
 @bp.route("/conversation", methods=["POST"])
 async def conversation():
