@@ -76,7 +76,27 @@ export const QuestionInput = ({ onSend, disabled, placeholder, clearOnSend, conv
 
   return (
     <Stack horizontal className={styles.questionInputContainer}>
-      <TextField
+      <div className={styles.fileInputContainer}>
+  <input
+    type="file"
+    id="attachmentInput"
+    onChange={(event) => {
+      const file = event.target.files?.[0];
+      if (file) {
+        console.log("📎 Attachment selected:", file.name);
+      }
+    }}
+    className={styles.fileInput}
+  />
+  <label htmlFor="attachmentInput" className={styles.attachmentLabel} aria-label='Upload Attachment'>
+    <FontIcon
+      className={styles.attachmentIcon}
+      iconName="Attach"
+      aria-label="Upload Attachment"
+    />
+  </label>
+</div>
+        <TextField
         className={styles.questionInputTextArea}
         placeholder={placeholder}
         multiline
