@@ -16,9 +16,9 @@ from quart import (
     current_app,
 )
 
+from functools import wraps
 
 from backend.auth.auth_utils import get_user_roles_from_token
-
 from openai import AsyncAzureOpenAI
 from azure.identity.aio import (
     DefaultAzureCredential,
@@ -43,6 +43,19 @@ bp = Blueprint("routes", __name__, static_folder="static", template_folder="stat
 
 cosmos_db_ready = asyncio.Event()
 
+# Role-based access control decorator
+def require_role(required_role):
+    @wraps
+    async def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            auth_header = request.headers.get("Authorization")
+            roles = await get_user_roles_from_token(auth_header)
+            if required_role not in roles:
+                return jsonify({"error": f"Unauthorized: {required_role} role required."}), 403
+            return await func(*args, **kwargs)
+        return wrapper
+    return decorator
 
 def create_app():
     app = Quart(__name__)
@@ -470,24 +483,24 @@ async def conversation_internal(request_body, request_headers):
     try:
         auth_header = request_headers.get("Authorization")
         roles = await get_user_roles_from_token(auth_header)
-        
+        logging.debug(f"User roles extracted from token: {roles}")
+
         # Set a system prompt based on role
         if "Admin" in roles:
             role_specific_system_prompt = "You are interacting with an Admin. Allow execution of admin tasks with validation."
         elif "User" in roles:
-            role_specific_system_prompt = "You are interacting with a standard user. Only provide user's own profile info and no admin functionality."
+            role_specific_system_prompt = "You are interacting with a standard user. Only provide user’s own profile info and no admin functionality."
         else:
             return jsonify({"error": "Unauthorized: No valid role assigned."}), 403
-            
+
         # Inject custom system message before processing the request
         if "messages" in request_body and isinstance(request_body["messages"], list):
-            # Insert at the beginning to override any existing system messages
             request_body["messages"].insert(0, {
                 "role": "system",
                 "content": role_specific_system_prompt
             })
-            
-        # Continue with existing chat processing logic
+
+        # Proceed with existing logic
         if app_settings.azure_openai.stream and not app_settings.base_settings.use_promptflow:
             result = await stream_chat_request(request_body, request_headers)
             response = await make_response(format_as_ndjson(result))
@@ -497,7 +510,7 @@ async def conversation_internal(request_body, request_headers):
         else:
             result = await complete_chat_request(request_body, request_headers)
             return jsonify(result)
-            
+
     except Exception as ex:
         logging.exception(ex)
         if hasattr(ex, "status_code"):
@@ -537,7 +550,6 @@ async def conversation():
     if not request.is_json:
         return jsonify({"error": "request must be json"}), 415
     request_json = await request.get_json()
-
     return await conversation_internal(request_json, request.headers)
 
 
