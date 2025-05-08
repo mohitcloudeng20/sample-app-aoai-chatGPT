@@ -482,6 +482,18 @@ async def conversation_internal(request_body, request_headers):
         else:
             return jsonify({"error": str(ex)}), 500
 
+# Define the require_admin decorator
+def require_admin(user: dict = Depends(lambda: {"role": "admin"})):  # Mock dependency for example
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return user
+
+# Apply the decorator to the endpoint
+@bp.get("/admin-endpoint")
+@require_admin
+async def admin_endpoint():
+    return {"message": "This is an admin-only endpoint"}
+
 @bp.route("/admin/users", methods=["GET"])
 @require_admin  # Only admins can access this endpoint
 async def list_users():
