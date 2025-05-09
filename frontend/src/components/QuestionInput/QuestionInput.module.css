@@ -94,18 +94,3 @@
 .uploadedImage {
   margin-right: 70px;
 }
-
-.attachmentLabel {
-  display: inline-block;
-  cursor: pointer;
-  font-size: 18px;
-  margin-left: 12px;
-  background: lightgray;
-  padding: 4px;
-  border-radius: 4px;
-}
-
-.attachmentIcon {
-  font-size: 20px;
-  color: #424242;
-}
