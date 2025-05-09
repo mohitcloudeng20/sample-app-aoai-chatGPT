@@ -396,16 +396,3 @@ a {
     max-width: 100%;
   }
 }
-
-.chatInputRow {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.attachmentButton {
-  font-size: 24px;
-  cursor: pointer;
-  margin-left: 8px;
-  margin-top: 4px;
-}
