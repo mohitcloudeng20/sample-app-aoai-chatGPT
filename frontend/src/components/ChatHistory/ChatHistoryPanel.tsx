@@ -121,29 +121,22 @@ export function ChatHistoryPanel(_props: ChatHistoryPanelProps) {
         </StackItem>
         <Stack verticalAlign="start">
           <Stack horizontal styles={commandBarButtonStyle}>
-<label htmlFor="fileUpload">
-  <input
-    type="file"
-    id="fileUpload"
-    style={{ display: 'none' }}
-    onChange={(event) => {
-      const file = event.target.files?.[0];
-      if (file) {
-        console.log('Attached file:', file.name);
-        // Implement upload logic here
-      }
-    }}
-  />
-  <CommandBarButton
-    iconProps={{ iconName: 'Attach' }}
-    title={'Attach File'}
-    aria-label={'attach file'}
-    styles={commandBarStyle}
-    role="button"
-    text="Attach"
-    onClick={() => document.getElementById('fileUpload')?.click()}
-  />
-</label>
+            <CommandBarButton
+              iconProps={{ iconName: 'More' }}
+              title={'Clear all chat history'}
+              onClick={onShowContextualMenu}
+              aria-label={'clear all chat history'}
+              styles={commandBarStyle}
+              role="button"
+              id="moreButton"
+            />
+            <ContextualMenu
+              items={menuItems}
+              hidden={!showContextualMenu}
+              target={'#moreButton'}
+              onItemClick={toggleClearAllDialog}
+              onDismiss={onHideContextualMenu}
+            />
             <CommandBarButton
               iconProps={{ iconName: 'Cancel' }}
               title={'Hide'}
