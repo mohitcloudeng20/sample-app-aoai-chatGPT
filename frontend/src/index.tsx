@@ -1,3 +1,8 @@
+// if this page is the Easy-Auth “done” callback, re-land on /
+if (window.location.pathname === '/.auth/login/done') {
+  window.location.replace('/');
+}
+
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { HashRouter, Route, Routes } from 'react-router-dom'
