@@ -43,6 +43,22 @@ cosmos_db_ready = asyncio.Event()
 
 def create_app():
     app = Quart(__name__)
+
+    @app.route('/.auth/login/done')
+    async def auth_login_done():
+        return redirect(url_for('routes.index'), code=302)
+
+    @app.route('/<path:path>')
+    async def catch_all(path):
+        full = os.path.join(bp.static_folder, path)
+        if os.path.isfile(full):
+            return await send_from_directory(bp.static_folder, path)
+        return await render_template(
+            'index.html',
+            title=current_app.config.get('UI_TITLE'),
+            favicon=current_app.config.get('UI_FAVICON')
+        )
+
     app.register_blueprint(bp)
     app.config["TEMPLATES_AUTO_RELOAD"] = True
     
