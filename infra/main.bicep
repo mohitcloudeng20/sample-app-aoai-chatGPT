@@ -141,6 +141,32 @@ module backend 'core/host/appservice.bicep' = {
   }
 }
 
+//
+// ─── Override Easy Auth (Google) to skip its “signed in” page ────────────────
+//
+resource authSettingsV2 'Microsoft.Web/sites/config@2022-09-01' = {
+  name: '${appServiceName}/authsettingsV2'
+  properties: {
+    // Unauthenticated requests get kicked to Google login
+    globalValidation: {
+      unauthenticatedClientAction: 'RedirectToLoginPage'
+    }
+
+    // After Google sign-in, immediately go to "/"
+    identityProviders: {
+      google: {
+        login: {
+          loginParameters: [
+            'post_login_redirect_url=/'
+          ]
+        }
+      }
+    }
+  }
+  dependsOn: [
+    backend  // your App Service module
+  ]
+}
 
 module openAi 'core/ai/cognitiveservices.bicep' = {
   name: 'openai'
