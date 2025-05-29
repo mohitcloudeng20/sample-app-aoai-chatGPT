@@ -35,6 +35,7 @@ from backend.utils import (
     convert_to_pf_format,
     format_pf_non_streaming_response,
 )
+from graph_client import get_user_by_email, list_all_users
 
 bp = Blueprint("routes", __name__, static_folder="static", template_folder="static")
 
@@ -449,9 +450,17 @@ async def complete_chat_request(request_body, request_headers):
         )
     else:
         response, apim_request_id = await send_chat_request(request_body, request_headers)
-        history_metadata = request_body.get("history_metadata", {})
-        return format_non_streaming_response(response, history_metadata, apim_request_id)
+    history_metadata = request_body.get("history_metadata", {})
+    non_streaming_response = format_non_streaming_response(response, history_metadata, apim_request_id)
 
+    if app_settings.azure_openai.function_call_azure_functions_enabled:
+        function_response = await process_function_call(response)
+        if function_response:
+            request_body["messages"].extend(function_response)
+            response, apim_request_id = await send_chat_request(request_body, request_headers)
+            history_metadata = request_body.get("history_metadata", {})
+            non_streaming_response = format_non_streaming_response(response, history_metadata, apim_request_id)
+    return non_streaming_response
 
 async def stream_chat_request(request_body, request_headers):
     response, apim_request_id = await send_chat_request(request_body, request_headers)
