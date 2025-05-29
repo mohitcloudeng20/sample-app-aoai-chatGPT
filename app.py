@@ -37,6 +37,19 @@ from backend.utils import (
 )
 from graph_client import get_user_by_email, list_all_users
 
+FUNCTIONS = [
+  {
+    "name": "get_my_profile",
+    "description": "Retrieve the signed-in user’s profile from Entra ID",
+    "parameters": { "type": "object", "properties": {} }
+  },
+  {
+    "name": "list_all_users",
+    "description": "List all users in the tenant (admin only)",
+    "parameters": { "type": "object", "properties": {} }
+  }
+]
+
 bp = Blueprint("routes", __name__, static_folder="static", template_folder="static")
 
 cosmos_db_ready = asyncio.Event()
@@ -47,6 +60,22 @@ def create_app():
     app.register_blueprint(bp)
     app.config["TEMPLATES_AUTO_RELOAD"] = True
     
+    @app.before_request
+    async def auth_middleware():
+        raw = request.headers.get("X-MS-CLIENT-PRINCIPAL")
+        if not raw:
+            abort(401)
+        principal = json.loads(base64.urlsafe_b64decode(raw + "==").decode())
+        email = next((c["val"] for c in principal["claims"]
+                      if c["typ"].endswith("/emailaddress")), None)
+        if not email:
+            abort(401)
+        admins = [e.strip().lower() for e in os.getenv("ADMIN_USERS","").split(",")]
+        request.ctx.user = {
+            "email": email,
+            "is_admin": email.lower() in admins
+        }
+
     @app.before_serving
     async def init():
         try:
@@ -460,6 +489,27 @@ async def complete_chat_request(request_body, request_headers):
             response, apim_request_id = await send_chat_request(request_body, request_headers)
             history_metadata = request_body.get("history_metadata", {})
             non_streaming_response = format_non_streaming_response(response, history_metadata, apim_request_id)
+            
+    fc = response.choices[0].message.get("function_call")
+    if fc:
+        # guard the admin‐only call
+        if fc["name"] == "list_all_users" and not request.ctx.user["is_admin"]:
+            result = {"error": "forbidden"}
+        elif fc["name"] == "get_my_profile":
+            result = get_user_by_email(request.ctx.user["email"])
+        elif fc["name"] == "list_all_users":
+            result = list_all_users()
+        else:
+            result = {"error": "unknown function"}
+        followup, _ = await init_openai_client().chat.completions.create(
+            messages=[
+                {"role":"assistant","content":None,"function_call": fc},
+                {"role":"function", "name": fc["name"], "content": json.dumps(result)}
+            ],
+            functions=FUNCTIONS,
+            function_call="auto",
+        )
+        return format_non_streaming_response(followup, history_metadata, apim_request_id)
     return non_streaming_response
 
 async def stream_chat_request(request_body, request_headers):
