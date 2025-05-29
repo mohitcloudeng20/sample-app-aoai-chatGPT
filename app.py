@@ -1,13 +1,11 @@
 import copy
 import json
 import os
-import base64
 import logging
 import uuid
 import httpx
 import asyncio
 from quart import (
-    abort,
     Blueprint,
     Quart,
     jsonify,
@@ -37,20 +35,6 @@ from backend.utils import (
     convert_to_pf_format,
     format_pf_non_streaming_response,
 )
-from graph_client import get_user_by_email, list_all_users
-
-FUNCTIONS = [
-  {
-    "name": "get_my_profile",
-    "description": "Retrieve the signed-in user’s profile from Entra ID",
-    "parameters": { "type": "object", "properties": {} }
-  },
-  {
-    "name": "list_all_users",
-    "description": "List all users in the tenant (admin only)",
-    "parameters": { "type": "object", "properties": {} }
-  }
-]
 
 bp = Blueprint("routes", __name__, static_folder="static", template_folder="static")
 
@@ -62,22 +46,6 @@ def create_app():
     app.register_blueprint(bp)
     app.config["TEMPLATES_AUTO_RELOAD"] = True
     
-    @app.before_request
-    async def auth_middleware():
-        raw = request.headers.get("X-MS-CLIENT-PRINCIPAL")
-        if not raw:
-            abort(401)
-        principal = json.loads(base64.urlsafe_b64decode(raw + "==").decode())
-        email = next((c["val"] for c in principal["claims"]
-                      if c["typ"].endswith("/emailaddress")), None)
-        if not email:
-            abort(401)
-        admins = [e.strip().lower() for e in os.getenv("ADMIN_USERS","").split(",")]
-        request.ctx.user = {
-            "email": email,
-            "is_admin": email.lower() in admins
-        }
-
     @app.before_serving
     async def init():
         try:
@@ -457,9 +425,6 @@ async def send_chat_request(request_body, request_headers):
     request_body['messages'] = filtered_messages
     model_args = prepare_model_args(request_body, request_headers)
 
-    model_args["functions"]     = FUNCTIONS
-    model_args["function_call"] = "auto"
-
     try:
         azure_openai_client = await init_openai_client()
         raw_response = await azure_openai_client.chat.completions.with_raw_response.create(**model_args)
@@ -471,8 +436,8 @@ async def send_chat_request(request_body, request_headers):
 
     return response, apim_request_id
 
+
 async def complete_chat_request(request_body, request_headers):
-    # 1) Prompt Flow branch (unchanged)
     if app_settings.base_settings.use_promptflow:
         response = await promptflow_request(request_body)
         history_metadata = request_body.get("history_metadata", {})
@@ -482,81 +447,11 @@ async def complete_chat_request(request_body, request_headers):
             app_settings.promptflow.response_field_name,
             app_settings.promptflow.citations_field_name
         )
-    # 2) Non-streaming Azure OpenAI branch
     else:
-        # a) initialize the client
-        azure_openai_client = await init_openai_client()
-
-        # b) First chat request, now including your Graph FUNCTIONS
-        response, apim_request_id = await azure_openai_client.chat.completions.create(
-            model=app_settings.azure_openai.model,
-            messages=request_body["messages"],
-            temperature=app_settings.azure_openai.temperature,
-            max_tokens=app_settings.azure_openai.max_tokens,
-            top_p=app_settings.azure_openai.top_p,
-            stop=app_settings.azure_openai.stop_sequence,
-            functions=FUNCTIONS,
-            function_call="auto",
-        )
+        response, apim_request_id = await send_chat_request(request_body, request_headers)
         history_metadata = request_body.get("history_metadata", {})
-        non_streaming_response = format_non_streaming_response(
-            response, history_metadata, apim_request_id
-        )
+        return format_non_streaming_response(response, history_metadata, apim_request_id)
 
-        # c) Optional Azure Functions wiring (your existing code)
-        if app_settings.azure_openai.function_call_azure_functions_enabled:
-            function_response = await process_function_call(response)
-            if function_response:
-                request_body["messages"].extend(function_response)
-                response, apim_request_id = await azure_openai_client.chat.completions.create(
-                    model=app_settings.azure_openai.model,
-                    messages=request_body["messages"],
-                    temperature=app_settings.azure_openai.temperature,
-                    max_tokens=app_settings.azure_openai.max_tokens,
-                    top_p=app_settings.azure_openai.top_p,
-                    stop=app_settings.azure_openai.stop_sequence,
-                    functions=FUNCTIONS,
-                    function_call="auto",
-                )
-                history_metadata = request_body.get("history_metadata", {})
-                non_streaming_response = format_non_streaming_response(
-                    response, history_metadata, apim_request_id
-                )
-
-        # d) Graph function-calling dispatch
-        fc = response.choices[0].message.get("function_call")
-        if fc:
-            # 1) Authorize
-            if fc["name"] == "list_all_users" and not request.ctx.user["is_admin"]:
-                result = {"error": "forbidden"}
-            # 2) Dispatch
-            elif fc["name"] == "get_my_profile":
-                result = get_user_by_email(request.ctx.user["email"])
-            elif fc["name"] == "list_all_users":
-                result = list_all_users()
-            else:
-                result = {"error": "unknown function"}
-
-            # 3) Follow-up chat call to inject the function result
-            followup_response, apim_request_id_2 = await azure_openai_client.chat.completions.create(
-                model=app_settings.azure_openai.model,
-                messages=[
-                    {"role": "assistant", "content": None, "function_call": fc},
-                    {"role": "function", "name": fc["name"], "content": json.dumps(result)},
-                ],
-                temperature=app_settings.azure_openai.temperature,
-                max_tokens=app_settings.azure_openai.max_tokens,
-                top_p=app_settings.azure_openai.top_p,
-                stop=app_settings.azure_openai.stop_sequence,
-                functions=FUNCTIONS,
-                function_call="auto",
-            )
-            return format_non_streaming_response(
-                followup_response, history_metadata, apim_request_id_2
-            )
-
-        # e) No function call → just return the normal response
-        return non_streaming_response
 
 async def stream_chat_request(request_body, request_headers):
     response, apim_request_id = await send_chat_request(request_body, request_headers)
